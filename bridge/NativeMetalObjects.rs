@@ -502,6 +502,7 @@ pub extern "C" fn nmb_device_vendor_name(device: *const NmbDevice, out: *mut c_c
             0x1002 => "AMD".to_string(),
             0x8086 => "Intel".to_string(),
             0x13b5 => "ARM".to_string(),
+            0x1010 => "Imagination".to_string(),
             _ => format!("0x{id:04x}"),
         };
         Ok(copy_out(&name, out, size))
