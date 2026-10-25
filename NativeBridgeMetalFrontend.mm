@@ -32,6 +32,21 @@ static id gDeviceObject;
 static uint64_t gRegistryID;
 static NSString *gName;
 static void (*gMissing)(const char *, const char *);
+static std::atomic<NativeMetalPipelineFailureCallback> gPipelineFailureCallback{nullptr};
+static std::atomic<unsigned> gPipelineFailureReports{0};
+extern "C" void native_bridge_metal_set_pipeline_failure_callback(NativeMetalPipelineFailureCallback callback) {
+ gPipelineFailureCallback.store(callback,std::memory_order_release);
+}
+static NativeMetalPipelineFailureCallback claimPipelineFailure(unsigned *sequence) {
+ auto callback=gPipelineFailureCallback.load(std::memory_order_acquire);
+ if(!callback)return nullptr;
+ unsigned n=gPipelineFailureReports.load(std::memory_order_relaxed);
+ while(n<2) {
+  if(gPipelineFailureReports.compare_exchange_weak(n,n+1,std::memory_order_relaxed)) {*sequence=n+1;return callback;}
+ }
+ return nullptr;
+}
+
 
 // What this device has been asked and refused, for the plugin's status line (native_bridge_metal_status): commits, render/compute pipelines made,
 // refusals, and the last two refusals' texts. Counters only; nothing here changes a result.
@@ -1016,9 +1031,10 @@ static void completed(void *context) {
 @end
 
 // ---- the device ----
-template <typename T> static T failWith(NSError **error,NSString *what,T value) {
- noteProblem([NSString stringWithFormat:@"%@: %@",what,lastError()]);
- if(error)*error=nbError([NSString stringWithFormat:@"%@: %@",what,lastError()]);
+template <typename T> static T failWith(NSError **error,NSString *what,T value,NSString *capturedReason=nil) {
+ NSString *message=[NSString stringWithFormat:@"%@: %@",what,capturedReason?:lastError()];
+ noteProblem(message);
+ if(error)*error=nbError(message);
  return value;
 }
 // Which of QuartzCore's paths asked for a pipeline (int-153: every one was made synchronously on its render thread and no generic pipeline
@@ -1125,6 +1141,19 @@ static void journalRenderPipeline(MTLRenderPipelineDescriptor *d,uint64_t began,
  line+=" | ";line+=quartzCoreCallers();
  for(char &c:line)if(c=='\n')c=' ';
  journal(line);
+}
+// Claim the bounded diagnostic before formatting. Called only after a failure,
+// including descriptor/archive rejection, never while gProblemLock is held.
+static void reportPipelineFailure(MTLRenderPipelineDescriptor *d,MTLPipelineOption options,NSError *error,const char *stage) {
+ unsigned sequence=0;auto callback=claimPipelineFailure(&sequence);if(!callback)return;
+ NBFunction *vf=[(id)d.vertexFunction isKindOfClass:[NBFunction class]]?(NBFunction *)d.vertexFunction:nil;
+ NBFunction *ff=[(id)d.fragmentFunction isKindOfClass:[NBFunction class]]?(NBFunction *)d.fragmentFunction:nil;
+ char spec[384];
+ snprintf(spec,sizeof spec,"label=%.64s v=%.80s f=%.80s samples=%lu c0=%lu opt=%llx",
+  d.label.UTF8String?:"-",vf?vf.name.UTF8String?:"-":"<missing/foreign>",
+  ff?ff.name.UTF8String?:"-":(d.fragmentFunction?"<foreign>":"-"),
+  (unsigned long)d.rasterSampleCount,(unsigned long)d.colorAttachments[0].pixelFormat,(unsigned long long)options);
+ callback(sequence,stage,error.localizedDescription.UTF8String?:"<no NSError>",spec);
 }
 // A render pipeline descriptor in the bridge's form; false, with the error, for a function of another device.
 static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NmbRenderPipelineDescriptor *p,NSError **error) {
@@ -1441,14 +1470,23 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
                                                         reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error {
  if(reflection)*reflection=nil;
  auto *p=new NmbRenderPipelineDescriptor();
- if(!renderDescriptor(d,p,error)){delete p;return nil;}
+ NSError *__autoreleasing diagnosticError=nil;
+ NSError *__autoreleasing *creationError=error?error:(gPipelineFailureCallback.load(std::memory_order_acquire)?&diagnosticError:nullptr);
+ if(!renderDescriptor(d,p,creationError)){delete p;reportPipelineFailure(d,options,creationError?*creationError:nil,"descriptor");return nil;}
  std::vector<NmbBinaryArchive *> archives;
- if(!pipelineArchives(d.binaryArchives,archives,error)){delete p;return nil;}
+ if(!pipelineArchives(d.binaryArchives,archives,creationError)){delete p;reportPipelineFailure(d,options,creationError?*creationError:nil,"archives");return nil;}
  const NmbPipelineOptions creation={(uint64_t)options,archives.data(),archives.size()};
  const uint64_t pipelineBegan=nowUs();const NBCost costBegan=NBCost::now();
- NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,p,&creation);delete p;gTimePipeline.add(pipelineBegan);
- journalRenderPipeline(d,pipelineBegan,handle?nullptr:nmb_last_error(),gJournalPath.empty()?std::string():NBCost::now().since(costBegan));
- if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
+ NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,p,&creation);
+ // Copy the runtime's thread-local error before journal/descriptor access can
+ // make another bridge call. NSError and UART must describe this exact refusal.
+ NSString *runtimeFailure=handle?nil:lastError();
+ delete p;gTimePipeline.add(pipelineBegan);
+ journalRenderPipeline(d,pipelineBegan,runtimeFailure.UTF8String,gJournalPath.empty()?std::string():NBCost::now().since(costBegan));
+ if(!handle) {
+  id<MTLRenderPipelineState> result=failWith<id<MTLRenderPipelineState>>(creationError,@"render pipeline",nil,runtimeFailure);
+  reportPipelineFailure(d,options,creationError?*creationError:nil,"runtime");return result;
+ }
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
 }
 // The asynchronous forms make the pipeline on the caller's thread and call the handler before returning, as the library's

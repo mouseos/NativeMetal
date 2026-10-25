@@ -13,6 +13,11 @@ id native_bridge_metal_open(const char *loader, const char *cache, uint64_t regi
 id native_bridge_metal_library_with_air(const void *bytes, size_t length);
 // One line for the plugin's status report: command buffers committed/failed locally, pipelines made, refusals, the last refusal's text.
 size_t native_bridge_metal_status(char *out, size_t size);
+// Optional diagnostic, null by default. Install before device publication. The
+// first two render-pipeline failures call it synchronously, outside telemetry
+// locks; strings are borrowed only for the call. It never changes the result.
+typedef void (*NativeMetalPipelineFailureCallback)(unsigned sequence, const char *stage, const char *error, const char *spec);
+void native_bridge_metal_set_pipeline_failure_callback(NativeMetalPipelineFailureCallback callback);
 // The pixel formats of the textures asked for (first eight distinct) and how many texture requests the runtime refused.
 size_t native_bridge_metal_formats(char *out, size_t size);
 size_t native_bridge_metal_telemetry(char *out, size_t size);
