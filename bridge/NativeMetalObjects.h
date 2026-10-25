@@ -34,6 +34,8 @@ const void *nmb_function_constant_air(size_t *length);
 
 /* loader: a library exporting vkGetInstanceProcAddr (Turnip on the tablet). cache: a writable directory for translated shaders. */
 NmbDevice *nmb_device_open(const char *loader, const char *cache);
+/* Default off; configure before publication. Filters only the Apple3 compatibility waiver. */
+bool nmb_device_require_fetch_for_apple3(const NmbDevice *, bool enabled);
 void nmb_device_release(NmbDevice *);
 size_t nmb_device_name(const NmbDevice *, char *out, size_t size);
 uint64_t nmb_device_max_buffer_length(const NmbDevice *);

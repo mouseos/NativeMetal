@@ -18,6 +18,8 @@ size_t native_bridge_metal_status(char *out, size_t size);
 // locks; strings are borrowed only for the call. It never changes the result.
 typedef void (*NativeMetalPipelineFailureCallback)(unsigned sequence, const char *stage, const char *error, const char *spec);
 void native_bridge_metal_set_pipeline_failure_callback(NativeMetalPipelineFailureCallback callback);
+// Default off; configure before opening the process device. Native backend family support is preserved.
+void native_bridge_metal_require_fetch_for_apple3(bool enabled);
 // The pixel formats of the textures asked for (first eight distinct) and how many texture requests the runtime refused.
 size_t native_bridge_metal_formats(char *out, size_t size);
 size_t native_bridge_metal_telemetry(char *out, size_t size);

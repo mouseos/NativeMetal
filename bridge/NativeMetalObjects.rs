@@ -140,7 +140,7 @@ pub unsafe extern "C" fn nmb_function_constant_air(length: *mut usize) -> *const
 
 // ---- device ----
 
-pub struct NmbDevice(Device, std::sync::OnceLock<PrivateProperties>, std::sync::Mutex<()>);
+pub struct NmbDevice(Device, std::sync::OnceLock<PrivateProperties>, std::sync::Mutex<()>, std::sync::atomic::AtomicBool);
 
 impl NmbDevice {
     /// The runtime judges the private properties by the family rows once.
@@ -164,7 +164,16 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         options.metal_level = Some(MetalLevel::NEWEST);
         options.shader_cache = metal2vulkan_runtime::ShaderCacheOptions::in_directory(cache.to_string_lossy().into_owned());
         options.messages = Some(MessageSink::new(observe_message));
-        Ok(boxed(NmbDevice(Device::system_default_with(&options).map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
+        Ok(boxed(NmbDevice(Device::system_default_with(&options).map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()), std::sync::atomic::AtomicBool::new(false))))
+    })
+}
+
+/// Opt-in compatibility policy. Configure before publishing this device.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_require_fetch_for_apple3(device: *const NmbDevice, enabled: bool) -> bool {
+    guard(false, || {
+        get(device)?.3.store(enabled, std::sync::atomic::Ordering::Release);
+        Ok(true)
     })
 }
 
@@ -361,18 +370,35 @@ pub unsafe extern "C" fn nmb_device_answer_selector(index: usize, kind: *mut u32
 /// through them: Core Image's Metal context needs Apple2 (`CIMetalDeviceIsSupported`), and without it falls back to an OpenGL ES context
 /// this device has none of (iconservicesagent crashed in `CI::GLContext::init`, int-155); QuartzCore splits a frame into command buffers of
 /// 128 draws where Apple3 is false (`MetalContext::flush`). Each waived row stays the runtime's own refusal where it is used, and
-/// `nmb_device_family_waivers` names them for the journal.
+/// `nmb_device_family_waivers` names them for the journal. An opt-in per-device policy
+/// withholds only the Apple3 waiver when the runtime cannot promise framebuffer reads.
 const TARGET_FAMILIES: [GpuFamily; 5] =
     [GpuFamily::Apple1, GpuFamily::Apple2, GpuFamily::Apple3, GpuFamily::Common1, GpuFamily::Common2];
+
+// Keep selector answers and waiver reporting on the same policy. This filters
+// compatibility claims only; the backend's native family answer always survives.
+fn target_family_override(device: &NmbDevice, family: GpuFamily) -> bool {
+    TARGET_FAMILIES.contains(&family)
+        && !(family == GpuFamily::Apple3
+            && device.3.load(std::sync::atomic::Ordering::Acquire)
+            && device.private().flag(PrivateFlag::IsFramebufferReadSupported).value() != Some(true))
+}
+
+fn supports_family(device: &NmbDevice, family: i64) -> bool {
+    device.0.supports_family(family)
+        || TARGET_FAMILIES.iter().any(|f| f.raw() == family && target_family_override(device, *f))
+}
 
 /// The rows of Apple's tables the device does not meet in the target families `supportsFamily:` answers true (`TARGET_FAMILIES`), one
 /// family per line ("Apple2 4: <row> ..."), into `out` (NUL-terminated); the length the whole text needs.
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_device_family_waivers(device: *const NmbDevice, out: *mut c_char, size: usize) -> usize {
     guard(0, || {
-        let d = &get(device)?.0;
+        let device = get(device)?;
+        let d = &device.0;
         let mut text = String::new();
         for family in TARGET_FAMILIES {
+            if !target_family_override(device, family) { continue; }
             let blockers = d.family_blockers(family);
             text += &format!("{family:?} {}:", blockers.len());
             for r in &blockers {
@@ -444,7 +470,7 @@ fn device_answer(device: &NmbDevice, selector: &str, arg: u64) -> Result<u64, St
         "supportsTextureSampleCount:" => gap(p.supports_texture_sample_count(arg))?,
         "supportsVertexAmplificationCount:" => gap(p.supports_vertex_amplification_count(arg))?,
         "supportsRasterizationRateMapWithLayerCount:" => gap(p.supports_rasterization_rate_map_with_layer_count(arg))?,
-        "supportsFamily:" => (d.supports_family(arg as i64) || TARGET_FAMILIES.iter().any(|f| f.raw() == arg as i64)) as u64,
+        "supportsFamily:" => supports_family(device, arg as i64) as u64,
         "supportsPrimitiveType:" => p.supports_primitive_type(arg) as u64,
         "supportsTextureWriteRoundingMode:" => p.supports_texture_write_rounding_mode(arg) as u64,
         _ => return Err(format!("{selector} is not a device query of the bridge")),

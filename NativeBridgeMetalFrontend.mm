@@ -32,6 +32,10 @@ static id gDeviceObject;
 static uint64_t gRegistryID;
 static NSString *gName;
 static void (*gMissing)(const char *, const char *);
+static std::atomic<bool> gRequireFetchForApple3{false};
+extern "C" void native_bridge_metal_require_fetch_for_apple3(bool enabled) {
+ gRequireFetchForApple3.store(enabled,std::memory_order_release);
+}
 static std::atomic<NativeMetalPipelineFailureCallback> gPipelineFailureCallback{nullptr};
 static std::atomic<unsigned> gPipelineFailureReports{0};
 extern "C" void native_bridge_metal_set_pipeline_failure_callback(NativeMetalPipelineFailureCallback callback) {
@@ -1582,6 +1586,7 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  gMissing=missing;gInFlight=[NSMutableSet set];
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
+ if(!nmb_device_require_fetch_for_apple3(gDevice,gRequireFetchForApple3.load(std::memory_order_acquire)))return nil;
  if(cache){gJournalPath=std::string(cache)+"/pipelines.log";gJournalBegan=nowUs();}
  char name[128]={};nmb_device_name(gDevice,name,sizeof name);gName=[NSString stringWithUTF8String:name];gRegistryID=registryID;
  // The target families supportsFamily: answers true, with the rows of Apple's tables the device does not meet in them (nmb_device_family_waivers).
