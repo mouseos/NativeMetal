@@ -18,6 +18,12 @@ size_t native_bridge_metal_status(char *out, size_t size);
 // locks; strings are borrowed only for the call. It never changes the result.
 typedef void (*NativeMetalPipelineFailureCallback)(unsigned sequence, const char *stage, const char *error, const char *spec);
 void native_bridge_metal_set_pipeline_failure_callback(NativeMetalPipelineFailureCallback callback);
+// Optional raw no-copy refusal diagnostic, null by default. Install before
+// publication. First four refusals only, synchronously after telemetry locks
+// and runtime import gates are released. Error is borrowed for this call only;
+// pointer is an address to print, never memory the callback may read or pin.
+typedef void (*NativeMetalNoCopyFailureCallback)(unsigned sequence, uintptr_t pointer, uint64_t length, uint64_t options, const char *error);
+void native_bridge_metal_set_no_copy_failure_callback(NativeMetalNoCopyFailureCallback callback);
 // Default off; configure before opening the process device. Native backend family support is preserved.
 void native_bridge_metal_require_fetch_for_apple3(bool enabled);
 // Default off; configure before device publication. Compile completion-form

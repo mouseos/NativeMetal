@@ -69,6 +69,23 @@ static NativeMetalPipelineFailureCallback claimPipelineFailure(unsigned *sequenc
  return nullptr;
 }
 
+// BEGIN raw no-copy refusal diagnostic (portable callback fixture).
+static std::atomic<NativeMetalNoCopyFailureCallback> gNoCopyFailureCallback{nullptr};
+static std::atomic<unsigned> gNoCopyFailureReports{0};
+extern "C" void native_bridge_metal_set_no_copy_failure_callback(NativeMetalNoCopyFailureCallback callback) {
+ gNoCopyFailureCallback.store(callback,std::memory_order_release);
+}
+static void reportNoCopyFailure(const void *pointer,uint64_t length,uint64_t options,const char *error) {
+ auto callback=gNoCopyFailureCallback.load(std::memory_order_acquire);if(!callback)return;
+ unsigned n=gNoCopyFailureReports.load(std::memory_order_relaxed);
+ while(n<4) {
+  if(gNoCopyFailureReports.compare_exchange_weak(n,n+1,std::memory_order_relaxed)) {
+   callback(n+1,reinterpret_cast<uintptr_t>(pointer),length,options,error);return;
+  }
+ }
+}
+// END raw no-copy refusal diagnostic
+
 
 // What this device has been asked and refused, for the plugin's status line (native_bridge_metal_status): commits, render/compute pipelines made,
 // refusals, and the last two refusals' texts. Counters only; nothing here changes a result.
@@ -1411,8 +1428,14 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  void *context=deallocator?(__bridge_retained void *)[deallocator copy]:nullptr;
  NmbBuffer *handle=nmb_buffer_new_no_copy_releasing(gDevice,pointer,length,options,context?releaseBlock:nullptr,context);
  if(!handle) {
+  // Copy this thread's runtime error before releasing the caller's block:
+  // captured-object destruction may itself enter the bridge and replace it.
+  NSString *reason=lastError();
   if(context)(void)(__bridge_transfer id)context;
-  NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;
+  NBLOG(@"native-metal: no-copy buffer refused: %@",reason);
+  // Raw path only: NBLOG/noteProblem returned; no SurfaceImportLock is held.
+  reportNoCopyFailure(pointer,length,options,reason.UTF8String?:"<no runtime error>");
+  return nil;
  }
  gNoCopyAll++;if(context)gNoCopyMade++;
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;buffer.wrapped=pointer;
