@@ -237,7 +237,7 @@ static void serveScanout(id device) {
     if (!opened) return;
     uint64_t reportedFrames = 0, reportedFailures = 0;
     while (client.serveOne(500)) {
-        const bool frame = st.frames && (st.frames == 1 || st.frames - reportedFrames >= 5);
+        const bool frame = st.frames != reportedFrames && (st.frames == 1 || st.frames - reportedFrames >= 5);
         if (frame || (st.failures && !reportedFailures)) {
             reportedFrames = st.frames ? st.frames : reportedFrames;
             reportedFailures = st.failures ? st.failures : reportedFailures;
