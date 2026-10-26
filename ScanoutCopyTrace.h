@@ -38,7 +38,8 @@ public:
         phase_.store(phase, std::memory_order_release);
     }
     // q=command buffer, b=blit encoder, t=route/texture setup, x=copy recording, e=endEncoding.
-    // First-copy writer only; no locks, allocation, BO reads, formatting or output.
+    // t/x depend on the route: interpret with CG/CS. First-copy writer only.
+    // No locks, allocation, BO reads, formatting or output.
     void encoded(unsigned step) {
         if (!clock_ || step < 1 || step > 5 || phase_.load(std::memory_order_relaxed) != 2 ||
             step <= encodePhase_.load(std::memory_order_relaxed)) return;
@@ -61,7 +62,7 @@ public:
             uint64_t end = times_[i].load(std::memory_order_relaxed);
             s.intervals[i-1] = end-previous; previous=end;
         }
-        s.encodePhase = encodePhase_.load(std::memory_order_acquire);
+        s.encodePhase = s.phase >= 2 ? encodePhase_.load(std::memory_order_acquire) : 0;
         uint64_t encodePrevious = times_[1].load(std::memory_order_relaxed);
         for (unsigned i=0; i<s.encodePhase; ++i) {
             const uint64_t next = encodeTimes_[i].load(std::memory_order_relaxed);

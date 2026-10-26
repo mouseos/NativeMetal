@@ -46,6 +46,11 @@ int main() {
     gpupresent::CopyTrace failure; failure.configure(clockUs);
     tick=10000; assert(failure.begin()); tick=11000; failure.reached(2);
     tick=12000; failure.returned();
+    gpupresent::CopyTrace guards; guards.configure(clockUs);
+    assert(guards.begin());unsigned beforeCalls=calls;guards.encoded(1);
+    assert(!guards.snapshot(tick).encodePhase && calls==beforeCalls);
+    guards.reached(2);guards.encoded(1);guards.reached(3);beforeCalls=calls;guards.encoded(2);
+    assert(guards.snapshot(tick).encodePhase==1 && calls==beforeCalls);
     gpupresent::CopyTrace encoding; encoding.configure(clockUs);
     tick=20000; assert(encoding.begin()); tick=21000; encoding.reached(2);
     std::atomic<bool> encodeDone{false}, encodeReading{false};
@@ -66,7 +71,10 @@ int main() {
     auto all=encoding.snapshot(tick);encoding.encoded(0);encoding.encoded(6);encoding.encoded(3);
     assert(encoding.snapshot(tick).encoding[4]==all.encoding[4]);
     encoding.reached(3);encoding.encoded(5);assert(encoding.snapshot(tick).encodePhase==5);
-    off.encoded(1);assert(!off.snapshot(tick).encodePhase);
+    auto complete=encoding.snapshot(tick);uint64_t encodeSum=0;
+    for(auto interval:complete.encoding)encodeSum+=interval;
+    assert(encodeSum<=complete.intervals[1]);
+    beforeCalls=calls;off.encoded(1);assert(!off.snapshot(tick).encodePhase && calls==beforeCalls);
     auto failed=failure.snapshot(99000);
     assert(failed.returned && failed.phase==2 && failed.elapsed==2000);
 }
@@ -136,7 +144,8 @@ with tempfile.TemporaryDirectory() as directory:
 # Verify the production hooks delimit the actual operations, including all encoding branches.
 presenter=(root/'GpuScanoutPresenter.h').read_text()
 ordered=['trace->begin(frame.width, frame.height, frame.stride, scanout_.stride)', 'newBufferWithBytesNoCopy:(void *)frame.base', 'trace->reached(2)',
-         '[queue_ commandBuffer]', '[blit endEncoding];\n        if (tracing)', 'trace->reached(3)',
+         '[queue_ commandBuffer]', 'trace->encoded(1)', '[commands blitCommandEncoder]', 'trace->encoded(2)',
+         'trace->encoded(4)', '[blit endEncoding];\n        if (tracing)', 'trace->encoded(5)', 'trace->reached(3)',
          '[commands commit]', 'trace->reached(4)', '[commands waitUntilCompleted]', 'trace->reached(5)']
 positions=[presenter.index(x) for x in ordered]
 assert positions == sorted(positions)
