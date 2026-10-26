@@ -20,6 +20,10 @@ typedef void (*NativeMetalPipelineFailureCallback)(unsigned sequence, const char
 void native_bridge_metal_set_pipeline_failure_callback(NativeMetalPipelineFailureCallback callback);
 // Default off; configure before opening the process device. Native backend family support is preserved.
 void native_bridge_metal_require_fetch_for_apple3(bool enabled);
+// Default off; configure before device publication. Compile completion-form
+// requests on one worker and deliver handlers on a separate queue. This is an
+// opt-in contract trial, not evidence that a particular UI stall is resolved.
+void native_bridge_metal_set_async_creation(bool enabled);
 // The pixel formats of the textures asked for (first eight distinct) and how many texture requests the runtime refused.
 size_t native_bridge_metal_formats(char *out, size_t size);
 size_t native_bridge_metal_telemetry(char *out, size_t size);

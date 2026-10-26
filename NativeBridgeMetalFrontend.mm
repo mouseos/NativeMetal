@@ -32,6 +32,24 @@ static id gDeviceObject;
 static uint64_t gRegistryID;
 static NSString *gName;
 static void (*gMissing)(const char *, const char *);
+// BEGIN async creation dispatch (also compiled by the direct-method fixture).
+static std::atomic<bool> gAsyncCreation{false};
+extern "C" void native_bridge_metal_set_async_creation(bool enabled) {
+ gAsyncCreation.store(enabled,std::memory_order_release);
+}
+static void enqueueCreation(dispatch_block_t work) {
+ // Created only on the opt-in path. Serial compilation bounds concurrency;
+ // completion delivery must never occupy this queue (a handler may request and
+ // wait for another pipeline). No caller/telemetry lock crosses the dispatch.
+ static dispatch_queue_t queue=dispatch_queue_create("org.unixnu.metal.creation",DISPATCH_QUEUE_SERIAL);
+ dispatch_async(queue,work);
+}
+static void completeCreation(dispatch_block_t handler) {
+ // Independent concurrent delivery permits nested requests to finish even if
+ // the outer handler waits. In particular this is not the caller's main queue.
+ dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{@autoreleasepool {handler();}});
+}
+// END async creation dispatch
 static std::atomic<bool> gRequireFetchForApple3{false};
 extern "C" void native_bridge_metal_require_fetch_for_apple3(bool enabled) {
  gRequireFetchForApple3.store(enabled,std::memory_order_release);
@@ -424,6 +442,14 @@ static std::string quartzCoreCallers();
  function.constantsText=text;if(error)*error=nil;return (id<MTLFunction>)function;
 }
 - (void)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values completionHandler:(void (^)(id<MTLFunction>,NSError *))handler {
+ if(gAsyncCreation.load(std::memory_order_acquire)) {
+  NSString *savedName=[name copy];MTLFunctionConstantValues *savedValues=[values copy];
+  enqueueCreation(^{@autoreleasepool {
+   NSError *error=nil;id<MTLFunction> function=[self newFunctionWithName:savedName constantValues:savedValues error:&error];
+   completeCreation(^{handler(function,error);});
+  }});
+  return;
+ }
  NSError *error=nil;id<MTLFunction> function=[self newFunctionWithName:name constantValues:values error:&error];
  handler(function,error);
 }
@@ -1493,23 +1519,52 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  }
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
 }
-// The asynchronous forms make the pipeline on the caller's thread and call the handler before returning, as the library's
-// newFunctionWithName:constantValues:completionHandler: does (RenderBox's pipeline loader, Core Image's bilateral solver).
+// Preserve the original inline path unless explicitly opted in before publication.
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d completionHandler:(MTLNewRenderPipelineStateCompletionHandler)handler {
+ if(gAsyncCreation.load(std::memory_order_acquire)) {
+  MTLRenderPipelineDescriptor *saved=[d copy];
+  enqueueCreation(^{@autoreleasepool {
+   NSError *error=nil;id<MTLRenderPipelineState> state=[(id<MTLDevice>)self newRenderPipelineStateWithDescriptor:saved error:&error];
+   completeCreation(^{handler(state,error);});
+  }});
+  return;
+ }
  NSError *error=nil;id<MTLRenderPipelineState> state=[(id<MTLDevice>)self newRenderPipelineStateWithDescriptor:d error:&error];
  handler(state,error);
 }
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d options:(MTLPipelineOption)options
                            completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)handler {
+ if(gAsyncCreation.load(std::memory_order_acquire)) {
+  MTLRenderPipelineDescriptor *saved=[d copy];
+  enqueueCreation(^{@autoreleasepool {
+   NSError *error=nil;id<MTLRenderPipelineState> state=[(id<MTLDevice>)self newRenderPipelineStateWithDescriptor:saved options:options reflection:nil error:&error];
+   completeCreation(^{handler(state,nil,error);});
+  }});
+  return;
+ }
  NSError *error=nil;id<MTLRenderPipelineState> state=[(id<MTLDevice>)self newRenderPipelineStateWithDescriptor:d options:options reflection:nil error:&error];
  handler(state,nil,error);
 }
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)function completionHandler:(MTLNewComputePipelineStateCompletionHandler)handler {
+ if(gAsyncCreation.load(std::memory_order_acquire)) {
+  enqueueCreation(^{@autoreleasepool {
+   NSError *error=nil;id<MTLComputePipelineState> state=[(id<MTLDevice>)self newComputePipelineStateWithFunction:function error:&error];
+   completeCreation(^{handler(state,error);});
+  }});
+  return;
+ }
  NSError *error=nil;id<MTLComputePipelineState> state=[(id<MTLDevice>)self newComputePipelineStateWithFunction:function error:&error];
  handler(state,error);
 }
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)function options:(MTLPipelineOption)options
                           completionHandler:(MTLNewComputePipelineStateWithReflectionCompletionHandler)handler {
+ if(gAsyncCreation.load(std::memory_order_acquire)) {
+  enqueueCreation(^{@autoreleasepool {
+   NSError *error=nil;id<MTLComputePipelineState> state=[(id<MTLDevice>)self newComputePipelineStateWithFunction:function options:options reflection:nil error:&error];
+   completeCreation(^{handler(state,nil,error);});
+  }});
+  return;
+ }
  NSError *error=nil;id<MTLComputePipelineState> state=[(id<MTLDevice>)self newComputePipelineStateWithFunction:function options:options reflection:nil error:&error];
  handler(state,nil,error);
 }
