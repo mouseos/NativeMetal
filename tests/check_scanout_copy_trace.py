@@ -124,7 +124,7 @@ assert 'swap.width, swap.height}, copyTrace_)' in client
 plugin=(root/'NativeVulkanMetalPlugin.mm').read_text()
 assert 'diag && !strcmp(diag, "1")' in plugin
 assert 'if (gCopyTraceEnabled)' in plugin
-assert 'transport, &st, false, &gCopyTrace)' in plugin
+assert 'transport, &st, gCopyTraceEnabled, &gCopyTrace)' in plugin
 assert len('CT i4294967295 n4294967295 c4294967295 w4294967295') <= 62
 print('PASS: default off, partial stages, concurrent snapshots, clock publication race, first-copy immutability, production hooks, bounded lines')
 

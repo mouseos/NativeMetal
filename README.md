@@ -40,3 +40,11 @@ backend job counts. For route 1 the runtime records separate one-region Vulkan
 copies; route 2 builds one multi-region copy, merging rows contiguous in both
 source and destination. Region/job counts must not be inferred from allocation
 size alone. No frame contents are read for these records.
+
+With `PVR_METAL_PIPELINE_DIAG=1`, the scanout client also uses its existing
+read-only verification of the first four successful copies. It compares
+32-bit pixels in the top 400 rows with the offered source, and reports the
+existing PF verified/mismatch counters. The lower diagnostic drawing area
+and row padding are not covered. This is pixel-readback evidence, not CPU
+rendering; the default profile leaves verification disabled. GPU copy timing
+excludes this comparison, but retirement latency includes its cost.

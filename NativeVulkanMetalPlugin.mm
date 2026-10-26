@@ -232,7 +232,7 @@ static void serveScanout(id device) {
     }
     gpuscanout::Stats st = {};
     gpuscanout::Client client;
-    const bool opened = client.open((id<MTLDevice>)device, transport, &st, false, &gCopyTrace);
+    const bool opened = client.open((id<MTLDevice>)device, transport, &st, gCopyTraceEnabled, &gCopyTrace);
     say("P%d e%x", st.step, (unsigned)st.error);
     if (!opened) return;
     uint64_t reportedFrames = 0, reportedFailures = 0;
