@@ -48,8 +48,12 @@ static void waitFor(dispatch_semaphore_t s) {
 @interface Token : NSObject
 @property(nonatomic,copy) NSString *name;
 @property(nonatomic,copy) NSString *compileName;
+- (MTLFunctionType)functionType;
 @end
 @implementation Token
+// The real descriptor validates vertexFunction before retaining/copying it.
+// Keep that SDK validation active rather than substituting a fake descriptor.
+- (MTLFunctionType)functionType {return MTLFunctionTypeVertex;}
 @end
 // A mutable constants object with NSCopying, to observe the production copy
 // boundary without relying on private MTLFunctionConstantValues readback SPI.
