@@ -52,10 +52,13 @@ public:
         if (tracing) trace->reached(2); // source import returned
         if (!source) return kNoResource;
         id<MTLCommandBuffer> commands = [queue_ commandBuffer];
+        if (tracing) trace->encoded(1);
         id<MTLBlitCommandEncoder> blit = commands ? [commands blitCommandEncoder] : nil;
+        if (tracing) trace->encoded(2);
         if (!blit) return kNoResource;
         if (frame.stride == scanout_.stride) {
             if (tracing) trace->route(0);
+            if (tracing) trace->encoded(3);
             // Equal pitch: the rows are one contiguous run.
             [blit copyFromBuffer:source sourceOffset:0 toBuffer:target_ destinationOffset:0 size:frame.stride * (frame.height - 1) + row];
         } else {
@@ -67,17 +70,21 @@ public:
             const NSUInteger alignment = [device_ minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
             if (tracing) trace->route(frame.stride % alignment ? 1 : 2, alignment);
             if (frame.stride % alignment) {
+                if (tracing) trace->encoded(3);
                 for (uint32_t y = 0; y < frame.height; ++y)
                     [blit copyFromBuffer:source sourceOffset:y * frame.stride toBuffer:target_ destinationOffset:y * scanout_.stride size:row];
             } else {
                 id<MTLTexture> texture = [source newTextureWithDescriptor:d offset:0 bytesPerRow:frame.stride];
+                if (tracing) trace->encoded(3);
                 if (!texture) {[blit endEncoding]; return kNoResource;}
                 [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
                            sourceSize:MTLSizeMake(frame.width, frame.height, 1) toBuffer:target_ destinationOffset:0
                     destinationBytesPerRow:scanout_.stride destinationBytesPerImage:scanout_.stride * frame.height];
             }
         }
+        if (tracing) trace->encoded(4);
         [blit endEncoding];
+        if (tracing) trace->encoded(5);
         if (tracing) trace->reached(3); // encoding returned
         [commands commit];
         if (tracing) trace->reached(4); // commit returned

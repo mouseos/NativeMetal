@@ -278,6 +278,9 @@ static void startServerThreads() {
                     say("CP%u e%u r%u", copy.phase, copyMs(copy.elapsed), copy.returned ? 1u : 0u);
                     say("CT i%u n%u c%u w%u", copyMs(copy.intervals[0]), copyMs(copy.intervals[1]),
                         copyMs(copy.intervals[2]), copyMs(copy.intervals[3]));
+                    say("CE p%u q%u b%u t%u", copy.encodePhase, copyMs(copy.encoding[0]),
+                        copyMs(copy.encoding[1]), copyMs(copy.encoding[2]));
+                    say("CX x%u e%u", copyMs(copy.encoding[3]), copyMs(copy.encoding[4]));
                     ++reports; lastCopyPhase = copy.phase; lastReturned = copy.returned;
                 }
             }

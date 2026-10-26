@@ -46,6 +46,27 @@ int main() {
     gpupresent::CopyTrace failure; failure.configure(clockUs);
     tick=10000; assert(failure.begin()); tick=11000; failure.reached(2);
     tick=12000; failure.returned();
+    gpupresent::CopyTrace encoding; encoding.configure(clockUs);
+    tick=20000; assert(encoding.begin()); tick=21000; encoding.reached(2);
+    std::atomic<bool> encodeDone{false}, encodeReading{false};
+    std::thread encodeReader([&] {
+        while(!encodeDone.load()) {
+            auto value=encoding.snapshot(99999);encodeReading.store(true);
+            assert(value.encodePhase<=5);
+            for(unsigned i=0;i<value.encodePhase;i++)assert(value.encoding[i]==(i+1)*100);
+        }
+    });
+    while(!encodeReading.load())std::this_thread::yield();
+    for(unsigned i=1;i<=5;i++) {tick+=i*100;encoding.encoded(i);
+        auto partial=encoding.snapshot(tick);assert(partial.encodePhase==i);
+        for(unsigned j=0;j<i;j++)assert(partial.encoding[j]==(j+1)*100);
+        for(unsigned j=i;j<5;j++)assert(partial.encoding[j]==0);
+    }
+    encodeDone.store(true);encodeReader.join();
+    auto all=encoding.snapshot(tick);encoding.encoded(0);encoding.encoded(6);encoding.encoded(3);
+    assert(encoding.snapshot(tick).encoding[4]==all.encoding[4]);
+    encoding.reached(3);encoding.encoded(5);assert(encoding.snapshot(tick).encodePhase==5);
+    off.encoded(1);assert(!off.snapshot(tick).encodePhase);
     auto failed=failure.snapshot(99000);
     assert(failed.returned && failed.phase==2 && failed.elapsed==2000);
 }
@@ -126,6 +147,9 @@ assert 'diag && !strcmp(diag, "1")' in plugin
 assert 'if (gCopyTraceEnabled)' in plugin
 assert 'transport, &st, gCopyTraceEnabled, &gCopyTrace)' in plugin
 assert len('CT i4294967295 n4294967295 c4294967295 w4294967295') <= 62
+assert len('CE p5 q4294967295 b4294967295 t4294967295')<=62
+assert len('CX x4294967295 e4294967295')<=62
+assert presenter.count('trace->encoded(3)')==3
 print('PASS: default off, partial stages, concurrent snapshots, clock publication race, first-copy immutability, production hooks, bounded lines')
 
 # Execute the actual observer scheduling/output policy with virtual time. The

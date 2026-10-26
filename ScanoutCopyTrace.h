@@ -8,13 +8,15 @@ namespace gpupresent {
 class CopyTrace {
     std::atomic<unsigned> phase_{0};
     std::atomic<uint64_t> times_[5]{};
+    std::atomic<uint64_t> encodeTimes_[5]{};
+    std::atomic<unsigned> encodePhase_{0};
     std::atomic<uint64_t> geometry_[5]{}; // width, height, source/target pitch, alignment
     std::atomic<unsigned> route_{3}; // 0 contiguous, 1 separate rows, 2 texture rows, 3 unselected
     std::atomic<bool> returned_{false};
     std::atomic<uint64_t> returnedAt_{0};
     uint64_t (*clock_)() = nullptr;
 public:
-    struct Snapshot { unsigned phase; bool returned; uint64_t elapsed; uint64_t intervals[4]; uint64_t geometry[5]; unsigned route; };
+    struct Snapshot { unsigned phase; bool returned; uint64_t elapsed; uint64_t intervals[4]; uint64_t geometry[5]; unsigned route; unsigned encodePhase; uint64_t encoding[5]; };
     // Configure before publishing the server threads; null is the default-off policy.
     void configure(uint64_t (*clock)()) { clock_ = clock; }
     bool begin(uint32_t width=0, uint32_t height=0, uint64_t sourcePitch=0, uint64_t targetPitch=0) {
@@ -35,6 +37,14 @@ public:
         times_[phase-1].store(clock_(), std::memory_order_relaxed);
         phase_.store(phase, std::memory_order_release);
     }
+    // q=command buffer, b=blit encoder, t=route/texture setup, x=copy recording, e=endEncoding.
+    // First-copy writer only; no locks, allocation, BO reads, formatting or output.
+    void encoded(unsigned step) {
+        if (!clock_ || step < 1 || step > 5 || phase_.load(std::memory_order_relaxed) != 2 ||
+            step <= encodePhase_.load(std::memory_order_relaxed)) return;
+        encodeTimes_[step-1].store(clock_(), std::memory_order_relaxed);
+        encodePhase_.store(step, std::memory_order_release);
+    }
     void returned() {
         returnedAt_.store(clock_(), std::memory_order_relaxed);
         returned_.store(true, std::memory_order_release);
@@ -50,6 +60,13 @@ public:
         for (unsigned i=1; i<s.phase; ++i) {
             uint64_t end = times_[i].load(std::memory_order_relaxed);
             s.intervals[i-1] = end-previous; previous=end;
+        }
+        s.encodePhase = encodePhase_.load(std::memory_order_acquire);
+        uint64_t encodePrevious = times_[1].load(std::memory_order_relaxed);
+        for (unsigned i=0; i<s.encodePhase; ++i) {
+            const uint64_t next = encodeTimes_[i].load(std::memory_order_relaxed);
+            s.encoding[i] = next >= encodePrevious ? next-encodePrevious : 0;
+            encodePrevious = next;
         }
         const uint64_t end = s.phase == 5 ? previous :
             (s.returned ? returnedAt_.load(std::memory_order_relaxed) : now);
