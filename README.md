@@ -31,3 +31,12 @@ IOMFB retirement, or visually verified display. The record excludes WAIT_SWAP
 and its kernel mapping work. None of these times represents native vblank.
 
 Host check: `python3 tests/check_scanout_copy_trace.py` (C++17, ASan/UBSan).
+
+The same first-copy report includes `CG w<width> h<height> a<alignment> r<route>`
+and `CS s<source-pitch> d<target-pitch>` (bytes). Routes: 0 contiguous buffer copy,
+1 separate Metal buffer copies per row, 2 one buffer-texture-to-buffer copy,
+3 not selected yet. These describe the actual Presenter branch, not measured
+backend job counts. For route 1 the runtime records separate one-region Vulkan
+copies; route 2 builds one multi-region copy, merging rows contiguous in both
+source and destination. Region/job counts must not be inferred from allocation
+size alone. No frame contents are read for these records.

@@ -38,7 +38,7 @@ public:
     bool ready() const { return target_ != nil; }
     // One frame: encodes the GPU copy, commits, waits for the GPU. Rows are copied as whole rows of width*4 bytes.
     Result present(const Frame &frame, CopyTrace *trace = nullptr) {
-        const bool tracing = trace && trace->begin();
+        const bool tracing = trace && trace->begin(frame.width, frame.height, frame.stride, scanout_.stride);
         struct TraceReturn {
             CopyTrace *trace;
             ~TraceReturn() { if (trace) trace->returned(); }
@@ -55,6 +55,7 @@ public:
         id<MTLBlitCommandEncoder> blit = commands ? [commands blitCommandEncoder] : nil;
         if (!blit) return kNoResource;
         if (frame.stride == scanout_.stride) {
+            if (tracing) trace->route(0);
             // Equal pitch: the rows are one contiguous run.
             [blit copyFromBuffer:source sourceOffset:0 toBuffer:target_ destinationOffset:0 size:frame.stride * (frame.height - 1) + row];
         } else {
@@ -63,7 +64,9 @@ public:
                                                                                        height:frame.height mipmapped:NO];
             d.storageMode = MTLStorageModeShared;
             d.usage = MTLTextureUsageShaderRead;
-            if (frame.stride % [device_ minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm]) {
+            const NSUInteger alignment = [device_ minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
+            if (tracing) trace->route(frame.stride % alignment ? 1 : 2, alignment);
+            if (frame.stride % alignment) {
                 for (uint32_t y = 0; y < frame.height; ++y)
                     [blit copyFromBuffer:source sourceOffset:y * frame.stride toBuffer:target_ destinationOffset:y * scanout_.stride size:row];
             } else {

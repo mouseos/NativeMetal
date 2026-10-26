@@ -272,6 +272,9 @@ static void startServerThreads() {
                 const auto copy = gCopyTrace.snapshot(copyClockUs());
                 copyReturned = copy.returned;
                 if (copy.phase && ((!copy.returned && reports < 8) || copy.phase != lastCopyPhase || copy.returned != lastReturned)) {
+                    say("CG w%llu h%llu a%llu r%u", (unsigned long long)copy.geometry[0],
+                        (unsigned long long)copy.geometry[1], (unsigned long long)copy.geometry[4], copy.route);
+                    say("CS s%llu d%llu", (unsigned long long)copy.geometry[2], (unsigned long long)copy.geometry[3]);
                     say("CP%u e%u r%u", copy.phase, copyMs(copy.elapsed), copy.returned ? 1u : 0u);
                     say("CT i%u n%u c%u w%u", copyMs(copy.intervals[0]), copyMs(copy.intervals[1]),
                         copyMs(copy.intervals[2]), copyMs(copy.intervals[3]));

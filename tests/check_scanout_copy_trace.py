@@ -18,7 +18,9 @@ int main() {
     gpupresent::CopyTrace off;
     assert(!off.begin()); assert(!calls); assert(!off.snapshot(0).phase);
     gpupresent::CopyTrace trace; trace.configure(clockUs);
-    assert(trace.begin()); assert(calls==1);
+    assert(trace.begin(800,1280,3328,3200)); assert(calls==1);
+    trace.route(2,16); auto layout=trace.snapshot(1000);
+    assert(layout.route==2 && layout.geometry[0]==800 && layout.geometry[1]==1280 && layout.geometry[2]==3328 && layout.geometry[3]==3200 && layout.geometry[4]==16);
     assert(trace.snapshot(999).elapsed==0); // reader clock can precede publication
     auto s=trace.snapshot(1400); assert(s.phase==1 && s.elapsed==400);
     tick=1600; trace.reached(2);
@@ -112,7 +114,7 @@ with tempfile.TemporaryDirectory() as directory:
 
 # Verify the production hooks delimit the actual operations, including all encoding branches.
 presenter=(root/'GpuScanoutPresenter.h').read_text()
-ordered=['trace->begin()', 'newBufferWithBytesNoCopy:(void *)frame.base', 'trace->reached(2)',
+ordered=['trace->begin(frame.width, frame.height, frame.stride, scanout_.stride)', 'newBufferWithBytesNoCopy:(void *)frame.base', 'trace->reached(2)',
          '[queue_ commandBuffer]', '[blit endEncoding];\n        if (tracing)', 'trace->reached(3)',
          '[commands commit]', 'trace->reached(4)', '[commands waitUntilCompleted]', 'trace->reached(5)']
 positions=[presenter.index(x) for x in ordered]
