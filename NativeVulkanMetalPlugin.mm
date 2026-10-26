@@ -59,6 +59,12 @@
 - (id)initWithAcceleratorPort:(unsigned)port;
 @end
 
+// Board-owned opt-in. The generic plugin and Adreno handler keep heap-only
+// behavior unless a board explicitly connects an existing text transport.
+extern "C" void native_metal_set_exception_output(void (*output)(const char *)) {
+    exceptiondiag::setOutput(output);
+}
+
 namespace vplugin {
 // ---- reports ----
 __attribute__((format(printf, 1, 2))) static void say(const char *format, ...) {
