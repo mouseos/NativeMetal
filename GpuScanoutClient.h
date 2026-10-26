@@ -33,14 +33,17 @@ struct Stats {
     uint64_t mismatchRows;   // rows of those frames that differ (CPU reads only: nothing is rendered or copied by the CPU)
     uint32_t lastMs;    // the GPU copy's time for the last frame
     uint64_t totalMs;   // and for all frames (the mean is totalMs / (frames + failures))
+    bool verifyFrames;  // read the scanout back and compare it with the surface (diagnostic evidence; off by default)
 };
 
 class Client {
 public:
-    // Reads the mode and maps the scanout; false with stats.step telling where it stopped.
-    bool open(id<MTLDevice> device, const Transport &transport, Stats *stats) {
+    // Reads the mode and maps the scanout; false with stats.step telling where it stopped. verifyFrames is the caller's
+    // diagnostic choice (off by default); it is not reset here so a pre-configured Stats survives open().
+    bool open(id<MTLDevice> device, const Transport &transport, Stats *stats, bool verifyFrames = false) {
         transport_ = transport;
         stats_ = stats;
+        stats_->verifyFrames = verifyFrames;
         NGPMode mode = {};
         note(0x6710);
         int status = transport_.call(transport_.context, NGP_METHOD_MODE, nullptr, 0, &mode, sizeof mode);
@@ -89,7 +92,7 @@ public:
             stats_->totalMs += stats_->lastMs;
         }
         stats_->lastResult = (int)r;
-        if (r == gpupresent::kOk && stats_->verified < 4) verify(swap);
+        if (r == gpupresent::kOk && stats_->verifyFrames && stats_->verified < 4) verify(swap);
         note(0x6731);   // the GPU copy returned
         NGPComplete done = {swap.sequence, r == gpupresent::kOk ? 0u : 0xe00002bcu /* kIOReturnError */, 0};
         const int completed = transport_.call(transport_.context, NGP_METHOD_COMPLETE_SWAP, &done, sizeof done, nullptr, 0);
