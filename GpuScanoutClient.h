@@ -40,7 +40,8 @@ class Client {
 public:
     // Reads the mode and maps the scanout; false with stats.step telling where it stopped. verifyFrames is the caller's
     // diagnostic choice (off by default); it is not reset here so a pre-configured Stats survives open().
-    bool open(id<MTLDevice> device, const Transport &transport, Stats *stats, bool verifyFrames = false) {
+    bool open(id<MTLDevice> device, const Transport &transport, Stats *stats, bool verifyFrames = false, gpupresent::CopyTrace *copyTrace = nullptr) {
+        copyTrace_ = copyTrace;
         transport_ = transport;
         stats_ = stats;
         stats_->verifyFrames = verifyFrames;
@@ -84,7 +85,7 @@ public:
         note(0x6730);   // a frame was offered
         const uint64_t began = mach_absolute_time();
         const gpupresent::Result r = presenter_->present({(const void *)(uintptr_t)swap.address, (size_t)((swap.bytes + page - 1) & ~(page - 1)),
-                                                          (size_t)swap.stride, swap.width, swap.height});
+                                                          (size_t)swap.stride, swap.width, swap.height}, copyTrace_);
         {
             static mach_timebase_info_data_t base;
             if (!base.denom) mach_timebase_info(&base);
@@ -101,6 +102,7 @@ public:
         return true;
     }
 private:
+    gpupresent::CopyTrace *copyTrace_ = nullptr;
     // Reads the scanout back with aligned 32-bit loads (the framebuffer is device memory; wider loads can fault) and compares the top rows with the
     // surface the GPU copied. The lower part of the panel is skipped: the diagnostic renderer paints there. Evidence only; nothing is written.
     void verify(const NGPSwap &swap) {

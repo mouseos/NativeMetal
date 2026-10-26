@@ -30,6 +30,8 @@
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include "ScanoutCopyTrace.h"
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -77,6 +79,15 @@ __attribute__((format(printf, 1, 2))) static void say(const char *format, ...) {
 }
 static void mark(uint32_t value) {native_metal_board_mark(value);}
 
+// First copy only, enabled by the existing board pipeline diagnostic policy.
+static gpupresent::CopyTrace gCopyTrace;
+static bool gCopyTraceEnabled = false;
+static uint64_t copyClockUs() {
+    static const mach_timebase_info_data_t base = [] { mach_timebase_info_data_t b{}; mach_timebase_info(&b); return b; }();
+    const uint64_t ticks = mach_absolute_time();
+    return (ticks / base.denom * base.numer + ticks % base.denom * base.numer / base.denom) / 1000;
+}
+static uint32_t copyMs(uint64_t us) { return (uint32_t)(us/1000 > UINT32_MAX ? UINT32_MAX : us/1000); }
 // ---- paths ----
 // The bundle's executable (<dir>/<Name>.bundle/<Name>): the bundle directory, the directory that holds it and <Name>.
 static bool locate(std::string &bundle, std::string &parent, std::string &name) {
@@ -221,7 +232,7 @@ static void serveScanout(id device) {
     }
     gpuscanout::Stats st = {};
     gpuscanout::Client client;
-    const bool opened = client.open((id<MTLDevice>)device, transport, &st);
+    const bool opened = client.open((id<MTLDevice>)device, transport, &st, false, &gCopyTrace);
     say("P%d e%x", st.step, (unsigned)st.error);
     if (!opened) return;
     uint64_t reportedFrames = 0, reportedFailures = 0;
@@ -240,6 +251,8 @@ static void serveScanout(id device) {
 }
 static id gServerDevice;
 static void startServerThreads() {
+    const char *diag = getenv("PVR_METAL_PIPELINE_DIAG");
+    if (diag && !strcmp(diag, "1")) { gCopyTrace.configure(copyClockUs); gCopyTraceEnabled = true; }
     pthread_attr_t attributes;
     pthread_attr_init(&attributes);
     pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
@@ -249,6 +262,14 @@ static void startServerThreads() {
     pthread_create(&thread, &attributes, [](void *) -> void * {
         for (unsigned phase = 0;; ++phase) {
             sleep(20);
+            if (gCopyTraceEnabled) {
+                const auto copy = gCopyTrace.snapshot(copyClockUs());
+                if (copy.phase) {
+                    say("CP%u e%u", copy.phase, copyMs(copy.elapsed));
+                    say("CT i%u n%u c%u w%u", copyMs(copy.intervals[0]), copyMs(copy.intervals[1]),
+                        copyMs(copy.intervals[2]), copyMs(copy.intervals[3]));
+                }
+            }
             char full[420], line[64];
             native_bridge_metal_status(full, sizeof full);
             const size_t length = strlen(full);

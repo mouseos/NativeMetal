@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <string.h>
+#include "ScanoutCopyTrace.h"
 
 namespace gpupresent {
 
@@ -36,13 +37,15 @@ public:
     }
     bool ready() const { return target_ != nil; }
     // One frame: encodes the GPU copy, commits, waits for the GPU. Rows are copied as whole rows of width*4 bytes.
-    Result present(const Frame &frame) {
+    Result present(const Frame &frame, CopyTrace *trace = nullptr) {
+        const bool tracing = trace && trace->begin();
         if (!ready()) return kBadScanout;
         const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
         if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
             frame.width != scanout_.width || frame.height != scanout_.height || frame.stride < row ||
             (size_t)frame.height > frame.bytes / frame.stride || frame.stride * (frame.height - 1) + row > frame.bytes) return kBadFrame;
         id<MTLBuffer> source = [device_ newBufferWithBytesNoCopy:(void *)frame.base length:frame.bytes options:MTLResourceStorageModeShared deallocator:nil];
+        if (tracing) trace->reached(2); // source import returned
         if (!source) return kNoResource;
         id<MTLCommandBuffer> commands = [queue_ commandBuffer];
         id<MTLBlitCommandEncoder> blit = commands ? [commands blitCommandEncoder] : nil;
@@ -68,8 +71,11 @@ public:
             }
         }
         [blit endEncoding];
+        if (tracing) trace->reached(3); // encoding returned
         [commands commit];
+        if (tracing) trace->reached(4); // commit returned
         [commands waitUntilCompleted];
+        if (tracing) trace->reached(5); // wait returned; status is checked below
         return commands.status == MTLCommandBufferStatusCompleted ? kOk : kGpuFailed;
     }
 private:
