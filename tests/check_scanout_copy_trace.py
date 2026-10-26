@@ -37,10 +37,15 @@ int main() {
     });
     while(!reading.load()) std::this_thread::yield();
     tick=2300; trace.reached(3); tick=3100; trace.reached(4);
-    tick=4000; trace.reached(5); done.store(true); reader.join();
+    tick=4000; trace.reached(5); trace.returned(); done.store(true); reader.join();
     s=trace.snapshot(999999); assert(s.phase==5 && s.elapsed==3000);
-    assert(!trace.begin()); assert(calls==5); // subsequent frames cannot overwrite
-    auto after=trace.snapshot(9999999); assert(after.elapsed==s.elapsed);
+    assert(!trace.begin()); assert(calls==6); // subsequent frames cannot overwrite
+    auto after=trace.snapshot(9999999); assert(after.elapsed==s.elapsed && after.returned);
+    gpupresent::CopyTrace failure; failure.configure(clockUs);
+    tick=10000; assert(failure.begin()); tick=11000; failure.reached(2);
+    tick=12000; failure.returned();
+    auto failed=failure.snapshot(99000);
+    assert(failed.returned && failed.phase==2 && failed.elapsed==2000);
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:
@@ -120,3 +125,53 @@ assert 'if (gCopyTraceEnabled)' in plugin
 assert 'transport, &st, false, &gCopyTrace)' in plugin
 assert len('CT i4294967295 n4294967295 c4294967295 w4294967295') <= 62
 print('PASS: default off, partial stages, concurrent snapshots, clock publication race, first-copy immutability, production hooks, bounded lines')
+
+# Execute the actual observer scheduling/output policy with virtual time. The
+# publisher is driven at sleep boundaries, avoiding wall-clock test delays.
+plugin=(root/'NativeVulkanMetalPlugin.mm').read_text()
+start=plugin.index('        unsigned phase = 0, statusSeconds = 0')
+end=plugin.index('            char full[420]',start)
+observer=plugin[start:end]+r"""
+            ++statusLines; ++phase;
+            assert(virtualSeconds == statusLines*20);
+            if(virtualSeconds>=60) break;
+        }
+"""
+mock = r"""
+#include "ScanoutCopyTrace.h"
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+static gpupresent::CopyTrace gCopyTrace;
+static bool gCopyTraceEnabled=true;
+static unsigned virtualSeconds=0,statusLines=0,copyLines=0,lastPair=0;
+static uint64_t copyClockUs() { return uint64_t(virtualSeconds)*1000000; }
+static uint32_t copyMs(uint64_t us) { return us/1000>UINT32_MAX ? UINT32_MAX : us/1000; }
+static void sleep(unsigned seconds) {
+    virtualSeconds+=seconds;
+    if(!gCopyTraceEnabled) { assert(seconds==20); return; }
+    if(virtualSeconds==2) assert(gCopyTrace.begin());
+    if(virtualSeconds==3) gCopyTrace.reached(2);
+    if(virtualSeconds==4) gCopyTrace.reached(3);
+    if(virtualSeconds==6) gCopyTrace.reached(4);
+    if(virtualSeconds==7) { gCopyTrace.reached(5); gCopyTrace.returned(); }
+}
+static void say(const char *format, ...) {
+    if(!strncmp(format,"CP",2)) { ++copyLines; lastPair=virtualSeconds; }
+}
+static void observe() {
+""" + observer + r"""
+}
+int main() {
+    gCopyTrace.configure(copyClockUs); observe();
+    assert(copyLines==6 && lastPair==7 && statusLines==3);
+    gCopyTraceEnabled=false; virtualSeconds=statusLines=copyLines=0;
+    observe(); assert(copyLines==0 && statusLines==3);
+}
+"""
+with tempfile.TemporaryDirectory() as directory:
+    tmp=Path(directory); (tmp/'observer.cpp').write_text(mock)
+    subprocess.run([os.environ.get('CXX','c++'), '-std=c++17', '-Wall','-Wextra','-Werror',
+                    '-fsanitize=address,undefined', '-I',str(root),str(tmp/'observer.cpp'),'-o',str(tmp/'observer')],check=True)
+    subprocess.run([str(tmp/'observer')],check=True)
+print('PASS: actual observer policy, 1-second pending snapshots, return restoration, unchanged 20-second ST/PUB cadence and default-off sleeps')

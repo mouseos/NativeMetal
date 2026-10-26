@@ -260,16 +260,26 @@ static void startServerThreads() {
     pthread_t thread;
     // The status line every 20 s: the formats asked for, then the bridge's counters in 57-character pieces.
     pthread_create(&thread, &attributes, [](void *) -> void * {
-        for (unsigned phase = 0;; ++phase) {
-            sleep(20);
+        unsigned phase = 0, statusSeconds = 0, reports = 0, lastCopyPhase = 0;
+        bool lastReturned = false, copyReturned = false;
+        for (;;) {
+            // Until the first copy returns, opt-in observation must precede the
+            // family's five-second timeout. Normal ST/PUB cadence stays 20 s.
+            const unsigned seconds = gCopyTraceEnabled && !copyReturned ? 1 : 20-statusSeconds;
+            sleep(seconds);
+            statusSeconds += seconds;
             if (gCopyTraceEnabled) {
                 const auto copy = gCopyTrace.snapshot(copyClockUs());
-                if (copy.phase) {
-                    say("CP%u e%u", copy.phase, copyMs(copy.elapsed));
+                copyReturned = copy.returned;
+                if (copy.phase && ((!copy.returned && reports < 8) || copy.phase != lastCopyPhase || copy.returned != lastReturned)) {
+                    say("CP%u e%u r%u", copy.phase, copyMs(copy.elapsed), copy.returned ? 1u : 0u);
                     say("CT i%u n%u c%u w%u", copyMs(copy.intervals[0]), copyMs(copy.intervals[1]),
                         copyMs(copy.intervals[2]), copyMs(copy.intervals[3]));
+                    ++reports; lastCopyPhase = copy.phase; lastReturned = copy.returned;
                 }
             }
+            if (statusSeconds < 20) continue;
+            statusSeconds %= 20;
             char full[420], line[64];
             native_bridge_metal_status(full, sizeof full);
             const size_t length = strlen(full);
@@ -281,6 +291,7 @@ static void startServerThreads() {
             } else {
                 say("ST%u %.57s", step - 1, full + (size_t)(step - 1) * 57);
             }
+            ++phase;
         }
         return nullptr;
     }, nullptr);

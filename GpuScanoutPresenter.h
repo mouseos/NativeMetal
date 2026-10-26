@@ -39,6 +39,10 @@ public:
     // One frame: encodes the GPU copy, commits, waits for the GPU. Rows are copied as whole rows of width*4 bytes.
     Result present(const Frame &frame, CopyTrace *trace = nullptr) {
         const bool tracing = trace && trace->begin();
+        struct TraceReturn {
+            CopyTrace *trace;
+            ~TraceReturn() { if (trace) trace->returned(); }
+        } traceReturn{tracing ? trace : nullptr};
         if (!ready()) return kBadScanout;
         const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
         if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
