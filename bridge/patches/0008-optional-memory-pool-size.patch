@@ -1,0 +1,31 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index de3df1e..5e869f6 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -51,6 +51,16 @@ use std::sync::Mutex;
+ /// The size of a pooled block, at most the device's `maxMemoryAllocationSize`.
+ pub(super) const BLOCK_BYTES: u64 = 64 << 20;
+ 
++// Optional pool sizing for memory-constrained devices. Unset/invalid keeps the
++// upstream 64 MiB policy; allocation limits and dedicated-resource rules remain.
++fn configured_block_bytes(value: Option<&str>) -> u64 {
++    match value.and_then(|s| s.parse::<u64>().ok()) {
++        Some(mib @ (4 | 8 | 16 | 32 | 64)) => mib << 20,
++        _ => BLOCK_BYTES,
++    }
++}
++
++
+ /// What memory a resource needs.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(super) enum MemoryClass {
+@@ -689,7 +699,8 @@ impl Memory {
+                 .map(|_| Pool::default())
+                 .collect(),
+             types,
+-            block_bytes: BLOCK_BYTES.min(max_allocation.max(1)),
++            block_bytes: configured_block_bytes(std::env::var("NMB_POOL_BLOCK_MIB").ok().as_deref())
++                .min(max_allocation.max(1)),
+             device_address,
+             address_types: None,
+             kept: None,
