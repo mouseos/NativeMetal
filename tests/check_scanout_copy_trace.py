@@ -133,6 +133,7 @@ start=plugin.index('        unsigned phase = 0, statusSeconds = 0')
 end=plugin.index('            char full[420]',start)
 observer=plugin[start:end]+r"""
             ++statusLines; ++phase;
+            assert(phase == statusLines);
             assert(virtualSeconds == statusLines*20);
             if(virtualSeconds>=60) break;
         }
