@@ -38,22 +38,31 @@ public:
     bool ready() const { return target_ != nil; }
     // One frame: encodes the GPU copy, commits, waits for the GPU. Rows are copied as whole rows of width*4 bytes.
     Result present(const Frame &frame, CopyTrace *trace = nullptr) {
-        const bool tracing = trace && trace->begin(frame.width, frame.height, frame.stride, scanout_.stride);
-        struct TraceReturn {
-            CopyTrace *trace;
-            ~TraceReturn() { if (trace) trace->returned(); }
-        } traceReturn{tracing ? trace : nullptr};
         if (!ready()) return kBadScanout;
         const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
         if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
             frame.width != scanout_.width || frame.height != scanout_.height || frame.stride < row ||
             (size_t)frame.height > frame.bytes / frame.stride || frame.stride * (frame.height - 1) + row > frame.bytes) return kBadFrame;
+        const bool tracing = trace && trace->begin(frame.width, frame.height, frame.stride, scanout_.stride);
+        struct TraceReturn {
+            CopyTrace *trace;
+            ~TraceReturn() { if (trace) trace->returned(); }
+        } traceReturn{tracing ? trace : nullptr};
         id<MTLBuffer> source = [device_ newBufferWithBytesNoCopy:(void *)frame.base length:frame.bytes options:MTLResourceStorageModeShared deallocator:nil];
         if (tracing) trace->reached(2); // source import returned
         if (!source) return kNoResource;
         id<MTLCommandBuffer> commands = [queue_ commandBuffer];
         if (tracing) trace->encoded(1);
-        id<MTLBlitCommandEncoder> blit = commands ? [commands blitCommandEncoder] : nil;
+        struct EncoderTraceScope {
+            CopyTrace *trace;
+            explicit EncoderTraceScope(CopyTrace *t) : trace(t) { if (trace) trace->encoderEnter(); }
+            ~EncoderTraceScope() { if (trace) trace->encoderLeave(); }
+        };
+        id<MTLBlitCommandEncoder> blit = nil;
+        {
+            EncoderTraceScope encoderTrace(tracing ? trace : nullptr);
+            blit = commands ? [commands blitCommandEncoder] : nil;
+        }
         if (tracing) trace->encoded(2);
         if (!blit) return kNoResource;
         if (frame.stride == scanout_.stride) {

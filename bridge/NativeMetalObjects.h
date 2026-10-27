@@ -212,6 +212,9 @@ bool nmb_encoder_update_fence(NmbEncoder *, NmbFence *, uint64_t stages);
 bool nmb_encoder_wait_fence(NmbEncoder *, NmbFence *, uint64_t stages);
 
 NmbEncoder *nmb_compute_encoder_new(NmbCommandBuffer *);
+/* Thread-local, scoped to the calling thread. The callback must not unwind or re-enter. */
+typedef void (*NmbEncoderTraceCallback)(void *, uint32_t);
+void nmb_encoder_open_trace_set(NmbEncoderTraceCallback, void *);
 NmbEncoder *nmb_blit_encoder_new(NmbCommandBuffer *);
 struct NmbPassAttachment {
     NmbTexture *texture;
