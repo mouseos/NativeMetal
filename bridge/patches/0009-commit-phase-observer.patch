@@ -1,22 +1,43 @@
 diff --git a/crates/metal2vulkan-runtime/Cargo.toml b/crates/metal2vulkan-runtime/Cargo.toml
-index 364edb4f..8073b00a 100644
+index 364edb4f..ffd8525c 100644
 --- a/crates/metal2vulkan-runtime/Cargo.toml
 +++ b/crates/metal2vulkan-runtime/Cargo.toml
-@@ -23,6 +23,9 @@ exclude = ["/target/", "**/*.air", "**/*.metallib", "**/*.spv"]
+@@ -23,6 +23,11 @@ exclude = ["/target/", "**/*.air", "**/*.metallib", "**/*.spv"]
  name = "metal2vulkan_runtime"
  path = "src/lib.rs"
  
 +[features]
 +unixnu-commit-trace = []
++# Board-specific opt-in: queue submission on the existing scheduler worker.
++unixnu-deferred-submit = []
 +
  # Runnable examples for consumers (README.md, "Examples"): each runs the owned fixture
  # validation/fixtures/public/examples/runtime_examples.metal on the system default device, from the
  # workspace checkout (its committed LLVM text, assembled by `llvm-as`), or a metallib passed as the
 diff --git a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
-index 8b3a0c25..cbdc0f62 100644
+index 8b3a0c25..2cfa6b7a 100644
 --- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
 +++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
-@@ -1536,9 +1536,13 @@ impl CommandBuffer {
+@@ -1310,6 +1310,8 @@ impl CommandBuffer {
+     ///   commit that found it submitting), or the thread of another `commit` that submits it in
+     ///   its pass (one that released it, or that was submitting as this commit was made). It
+     ///   runs with no lock of the runtime's held, after the submission's call returned.
++    ///   With the opt-in `unixnu-deferred-submit` feature, the scheduler worker submits and
++    ///   runs these handlers; callbacks may start before the committing call returns.
+     /// - **Before.** Its handlers run, in the order added, before the status reads `Scheduled`,
+     ///   before [`wait_until_scheduled`](Self::wait_until_scheduled) returns, before its
+     ///   scheduled handlers run, and before it can complete. The GPU may run the work meanwhile:
+@@ -1322,7 +1324,8 @@ impl CommandBuffer {
+     ///   commit's thread runs it, and on the scheduler thread the device's other submissions,
+     ///   among them those of a commit left to the pass that submitted this command buffer, which
+     ///   the thread may take in only after its handlers (`scheduler/inbox.rs`). A commit made
+-    ///   while it runs that finds no pass under way submits its own ready batches. A wait in it
++    ///   while it runs that finds no pass under way submits its own ready batches, except with
++    ///   `unixnu-deferred-submit`, where the worker waits until the handler returns. A wait in it
+     ///   for a command buffer, or for a slot of a full queue, that has not happened yet is refused
+     ///   (`WaitWouldDeadlock` of [`DeadlockCause::SubmissionHandler`]); it must not wait for GPU
+     ///   work otherwise.
+@@ -1536,9 +1539,13 @@ impl CommandBuffer {
  
      /// [`commit_as`](Self::commit_as) itself.
      fn commit_now(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
@@ -30,7 +51,7 @@ index 8b3a0c25..cbdc0f62 100644
              if let Some(problem) = state.refusal() {
                  return Err(invalid(call, problem));
              }
-@@ -1576,6 +1580,8 @@ impl CommandBuffer {
+@@ -1576,6 +1583,8 @@ impl CommandBuffer {
          // Metal's is: a no-copy buffer or a heap among it is reached unnamed from here, by its
          // own commands too, the work recorded below included (`live_buffers.rs`). Listed without
          // the lock: what it upgrades may be a resource's last hold.
@@ -39,7 +60,7 @@ index 8b3a0c25..cbdc0f62 100644
          let used = reached.list();
          device.shared().live_buffers.reach(&used);
          // Listed again at its first submission where the list changed since (a rebind ends a
-@@ -1583,10 +1589,14 @@ impl CommandBuffer {
+@@ -1583,10 +1592,14 @@ impl CommandBuffer {
          let listing = Listing::new(device, used);
          // Recorded, or settled for their host steps, with the lock free: their dispatches take it,
          // and announce degradations.
@@ -54,7 +75,7 @@ index 8b3a0c25..cbdc0f62 100644
          let prepared = match prepared {
              Ok(prepared) => prepared,
              Err(error) => {
-@@ -1742,10 +1752,14 @@ impl CommandBuffer {
+@@ -1742,10 +1755,14 @@ impl CommandBuffer {
          // the scheduler can run one.
          let _ = self.0.step_numbers.set(StepNumbers::reserve());
          // The scheduler's lock is taken before a command buffer's, never under it.
@@ -69,7 +90,7 @@ index 8b3a0c25..cbdc0f62 100644
          if let Some(image) = away {
              device.degrade(Degradation::WrappedImageLayoutTransitions, || {
                  image.notice()
-@@ -2900,3 +2914,72 @@ fn submission_error(device: &Device, error: vk::Result) -> CommandBufferError {
+@@ -2900,3 +2917,83 @@ fn submission_error(device: &Device, error: vk::Result) -> CommandBufferError {
          _ => CommandBufferError::Internal(super::error::VkResultCode(error.as_raw())),
      }
  }
@@ -99,9 +120,16 @@ index 8b3a0c25..cbdc0f62 100644
 +    struct Scope(Option<State>, std::marker::PhantomData<std::rc::Rc<()>>);
 +    impl Scope {
 +        fn begin(id: u64, clock: Clock, sink: Sink) -> Self {
-+            let previous = ACTIVE.with(|slot| slot.replace(Some(State {
-+                id, clock, sink, rows: [(0, 0); 8], len: 0, overflow: false,
-+            })));
++            let previous = ACTIVE.with(|slot| {
++                slot.replace(Some(State {
++                    id,
++                    clock,
++                    sink,
++                    rows: [(0, 0); 8],
++                    len: 0,
++                    overflow: false,
++                }))
++            });
 +            Self(previous, std::marker::PhantomData)
 +        }
 +    }
@@ -115,7 +143,9 @@ index 8b3a0c25..cbdc0f62 100644
 +                for &(kind, tick) in &state.rows[..state.len] {
 +                    (state.sink)(kind, state.id, tick);
 +                }
-+                if state.overflow { (state.sink)(59, state.id, (state.clock)()); }
++                if state.overflow {
++                    (state.sink)(59, state.id, (state.clock)());
++                }
 +            }
 +            DRAINING.with(|flag| flag.set(false));
 +            ACTIVE.with(|slot| slot.set(self.0));
@@ -124,7 +154,9 @@ index 8b3a0c25..cbdc0f62 100644
 +    /// Capture one synchronous call. The clock and sink must satisfy their contracts;
 +    /// nested calls are isolated and the scope is restored on unwind.
 +    pub fn capture<T>(id: u64, clock: Clock, sink: Sink, call: impl FnOnce() -> T) -> T {
-+        if DRAINING.with(|flag| flag.get()) { return call(); }
++        if DRAINING.with(|flag| flag.get()) {
++            return call();
++        }
 +        let _scope = Scope::begin(id, clock, sink);
 +        call()
 +    }

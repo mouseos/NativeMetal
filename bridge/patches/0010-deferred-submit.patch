@@ -1,0 +1,500 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index a8e107f5..ccb3f5ef 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -143,6 +143,9 @@ jobs:
+       - name: Test metal2vulkan
+         run: cargo nextest run -p metal2vulkan -p metal2vulkan-air -p metal2vulkan-runtime -p metal2vulkan-devtools --all-features
+ 
++      - name: Test runtime with default scheduler
++        run: cargo nextest run -p metal2vulkan-runtime
++
+       # GPU-free on every host: tests that open a device compile only under `--cfg m2v_gpu` or
+       # `--cfg m2v_cpu_icd`, and no device-opening code runs without one of them.
+       - name: Test validation suite
+@@ -162,6 +165,13 @@ jobs:
+           LP_NUM_THREADS: "1"
+         run: cargo nextest run -p metal2vulkan-validation --all-features
+ 
++      - name: Test validation suite on CPU Vulkan ICD with default scheduler (Linux)
++        if: runner.os == 'Linux'
++        env:
++          RUSTFLAGS: -Dwarnings --cfg m2v_cpu_icd
++          LP_NUM_THREADS: "1"
++        run: cargo nextest run -p metal2vulkan-validation
++
+       # Machine-specific semantic qualification remains explicit. Linux CI has lavapipe, so it can
+       # execute the owned public cases with the engine, in both robustness legs, against their
+       # exact committed Metal observations without a physical GPU. Rows written here are ephemeral
+diff --git a/crates/metal2vulkan-runtime/README.md b/crates/metal2vulkan-runtime/README.md
+index c6dc9f69..9d7cef87 100644
+--- a/crates/metal2vulkan-runtime/README.md
++++ b/crates/metal2vulkan-runtime/README.md
+@@ -56,6 +56,11 @@ ash = { version = "0.38", default-features = false, features = ["std"] }
+   directory, and in memory ([HOWTO](../../docs/HOWTO.md#the-runtimes-shader-cache)).
+   `ShaderCacheOptions` names another directory; give each test its own.
+ 
++The opt-in `unixnu-deferred-submit` Cargo feature hands ready submissions to the scheduler
++worker. Submission handlers run on that worker, and a slow handler or check can delay later
++submissions. Commit preparation and synchronization can still block. The default remains inline
++submission when the scheduler is free.
++
+ ## A first dispatch
+ 
+ From [`examples/compute_dispatch.rs`](examples/compute_dispatch.rs):
+diff --git a/crates/metal2vulkan-runtime/src/command_buffer/checks.rs b/crates/metal2vulkan-runtime/src/command_buffer/checks.rs
+index 016dea9f..6121248e 100644
+--- a/crates/metal2vulkan-runtime/src/command_buffer/checks.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/checks.rs
+@@ -55,8 +55,9 @@ use std::sync::Arc;
+ /// pass of another commit's thread it finds under way; where that pass is the last that thread
+ /// makes for others, which leaves what it is left to the scheduler's thread
+ /// (`scheduler/inbox.rs`), they wait for this check to end, unless a later commit takes them in
+-/// first. It must not wait for GPU work, a command buffer or a handler, and should be quick. It
+-/// may call the runtime otherwise.
++/// first. With `unixnu-deferred-submit`, commits are handed to the worker and wait until this
++/// check returns. It must not wait for GPU work, a command buffer or a handler, and should be quick.
++/// It may call the runtime otherwise.
+ pub type SubmissionCheck = Arc<dyn Fn(&Submission<'_>) -> Option<NonZeroU64> + Send + Sync>;
+ 
+ /// The `MTLCommandBufferError` code a submission whose check panicked fails with: `Internal`.
+diff --git a/crates/metal2vulkan-runtime/src/scheduler/inbox.rs b/crates/metal2vulkan-runtime/src/scheduler/inbox.rs
+index d15cf8e7..fdddee05 100644
+--- a/crates/metal2vulkan-runtime/src/scheduler/inbox.rs
++++ b/crates/metal2vulkan-runtime/src/scheduler/inbox.rs
+@@ -55,9 +55,11 @@ use std::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
+ use std::sync::{Mutex, TryLockError};
+ 
+ /// The passes a committing thread's look again makes at most ([`Inbox::commit`]).
++#[cfg(any(test, not(feature = "unixnu-deferred-submit")))]
+ pub(crate) const AGAIN: usize = 1;
+ 
+ /// What became of a commit ([`Inbox::commit`]).
++#[cfg(any(test, not(feature = "unixnu-deferred-submit")))]
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub(crate) struct Outcome {
+     /// It was left to another thread's pass.
+@@ -141,6 +143,15 @@ impl<S, C> Inbox<S, C> {
+         true
+     }
+ 
++    /// Admit work without running a scheduler pass on the producer. The caller must
++    /// wake the scheduler after this returns. The commits mutex orders admissions.
++    #[cfg(feature = "unixnu-deferred-submit")]
++    pub(crate) fn enqueue(&self, commit: C) {
++        let mut commits = lock(&self.commits);
++        commits.push(commit);
++        self.posted.store(true, Ordering::SeqCst);
++    }
++
+     /// Commit `commit`: where the lock is free, make the pass on this thread, `pass` taking in
+     /// what the inbox held and `commit` after it, in commit order; where another thread holds it,
+     /// leave `commit` to that thread's pass. Then look at the inbox again ([`look_again`]), making
+@@ -148,6 +159,7 @@ impl<S, C> Inbox<S, C> {
+     /// inbox was left unattended (the module docs).
+     ///
+     /// [`look_again`]: Self::look_again
++    #[cfg(any(test, not(feature = "unixnu-deferred-submit")))]
+     pub(crate) fn commit(&self, commit: C, mut pass: impl FnMut(&mut S, Vec<C>)) -> Outcome {
+         let mut pass = |state: &mut S, commits: Vec<C>| {
+             pass(state, commits);
+diff --git a/crates/metal2vulkan-runtime/src/scheduler/left.rs b/crates/metal2vulkan-runtime/src/scheduler/left.rs
+index 26718a33..7c55d092 100644
+--- a/crates/metal2vulkan-runtime/src/scheduler/left.rs
++++ b/crates/metal2vulkan-runtime/src/scheduler/left.rs
+@@ -96,6 +96,11 @@ pub(crate) fn work_through<S, C, W>(
+                 return None;
+             }
+             left.end_round();
++            // In handoff mode producers cannot make their own passes. Make one
++            // round before each piece, then let existing checks/steps progress.
++            if cfg!(feature = "unixnu-deferred-submit") {
++                break;
++            }
+         }
+         let Some((kind, work)) = left.pop() else {
+             break;
+diff --git a/crates/metal2vulkan-runtime/src/scheduler/mod.rs b/crates/metal2vulkan-runtime/src/scheduler/mod.rs
+index 2aa0798a..ab5887f6 100644
+--- a/crates/metal2vulkan-runtime/src/scheduler/mod.rs
++++ b/crates/metal2vulkan-runtime/src/scheduler/mod.rs
+@@ -248,30 +248,39 @@ impl Scheduler {
+             queue,
+             batches,
+         };
+-        let (mut passed, mut left) = (Passed::default(), Left::default());
+-        let outcome = (shared.inbox).commit(committed, |state, commits| {
+-            pass(state, commits, (&mut passed, &mut left), shared, false);
+-        });
+-        if outcome.left {
++        #[cfg(feature = "unixnu-deferred-submit")]
++        {
++            shared.inbox.enqueue(committed);
+             buffer.device().shared().counts.commit_handed_off();
+-        }
+-        // What other threads left to this thread's last pass goes to the scheduler's thread.
+-        if outcome.unattended {
+             self.wake();
+         }
+-        let Passed {
+-            spent,
+-            settled,
+-            handlers,
+-            ..
+-        } = passed;
+-        settle(settled);
+-        // On the committing thread, before `commit` returns.
+-        run_submission_handlers(handlers);
+-        // Without the lock, as the thread lets go of them: the thread finds the steps and the
+-        // checks again in its own pass, which the pass that found them woke it for.
+-        drop(spent);
+-        drop(left);
++        #[cfg(not(feature = "unixnu-deferred-submit"))]
++        {
++            let (mut passed, mut left) = (Passed::default(), Left::default());
++            let outcome = (shared.inbox).commit(committed, |state, commits| {
++                pass(state, commits, (&mut passed, &mut left), shared, false);
++            });
++            if outcome.left {
++                buffer.device().shared().counts.commit_handed_off();
++            }
++            // What other threads left to this thread's last pass goes to the scheduler's thread.
++            if outcome.unattended {
++                self.wake();
++            }
++            let Passed {
++                spent,
++                settled,
++                handlers,
++                ..
++            } = passed;
++            settle(settled);
++            // On the committing thread, before `commit` returns.
++            run_submission_handlers(handlers);
++            // Without the lock, as the thread lets go of them: the thread finds the steps and the
++            // checks again in its own pass, which the pass that found them woke it for.
++            drop(spent);
++            drop(left);
++        }
+     }
+ 
+     /// What makes the thread look for work again from any thread: a pipeline a held batch's
+@@ -443,7 +452,9 @@ fn round(shared: &SchedulerShared, left: &mut Left<Work>) -> bool {
+     let mut passed = Passed::default();
+     (shared.inbox).pass(|state, commits| {
+         pass(state, commits, (&mut passed, &mut *left), shared, true);
+-        !passed.exiting && left.is_empty()
++        // With all commits handed off, finish this pass's handlers before taking
++        // another batch, even if producers keep the inbox continuously nonempty.
++        !cfg!(feature = "unixnu-deferred-submit") && !passed.exiting && left.is_empty()
+     });
+     let Passed {
+         spent,
+diff --git a/crates/metal2vulkan-runtime/src/tests/inbox.rs b/crates/metal2vulkan-runtime/src/tests/inbox.rs
+index 1a616188..7c006ef1 100644
+--- a/crates/metal2vulkan-runtime/src/tests/inbox.rs
++++ b/crates/metal2vulkan-runtime/src/tests/inbox.rs
+@@ -478,3 +478,91 @@ fn wakers_racing_passes_and_commits_have_every_change_read_by_a_pass() {
+     assert_eq!(seen.log.len(), (THREADS * COMMITS) as usize, "each once");
+     assert!(!model.inbox.holds_commits() && !model.inbox.nudged());
+ }
++
++#[cfg(feature = "unixnu-deferred-submit")]
++#[test]
++fn enqueue_does_not_run_pass_on_producer_and_drains_in_order() {
++    let inbox = Log::new(Vec::new());
++    for i in 0..100 {
++        inbox.enqueue(i);
++    }
++    assert!(inbox.holds_commits());
++    inbox.pass(|state, commits| {
++        take_in(state, commits);
++        true
++    });
++    assert_eq!(*lock(inbox.state()), (0..100).collect::<Vec<_>>());
++    assert!(!inbox.holds_commits());
++}
++
++#[cfg(feature = "unixnu-deferred-submit")]
++#[test]
++fn enqueue_during_blocked_pass_is_drained_in_order() {
++    let inbox = Arc::new(Log::new(Vec::new()));
++    let signal = Arc::new(Condvar::new());
++    let (entered, in_pass) = mpsc::channel();
++    let (release, released) = mpsc::channel::<()>();
++    inbox.enqueue(0);
++    let worker = {
++        let inbox = Arc::clone(&inbox);
++        thread::spawn(move || {
++            inbox.pass(|state, commits| {
++                take_in(state, commits);
++                if state == &[0] {
++                    entered.send(()).unwrap();
++                    released.recv_timeout(WAIT).unwrap();
++                }
++                true
++            });
++        })
++    };
++    in_pass.recv_timeout(WAIT).unwrap();
++    for i in 1..=100 {
++        inbox.enqueue(i);
++        if inbox.wake(|_| {}) {
++            signal.notify_all();
++        }
++    }
++    release.send(()).unwrap();
++    worker.join().unwrap();
++    assert_eq!(*lock(inbox.state()), (0..=100).collect::<Vec<_>>());
++    assert!(!inbox.holds_commits());
++}
++
++#[cfg(feature = "unixnu-deferred-submit")]
++#[test]
++fn enqueue_wakes_sleeping_worker_at_wait_boundary() {
++    let inbox = Arc::new(Log::new(Vec::new()));
++    let signal = Arc::new(Condvar::new());
++    let (ready, waiting) = mpsc::channel();
++    let (done, completed) = mpsc::channel();
++    let worker = {
++        let inbox = Arc::clone(&inbox);
++        let signal = Arc::clone(&signal);
++        thread::spawn(move || {
++            let mut state = lock(inbox.state());
++            ready.send(()).unwrap();
++            while !inbox.holds_commits() {
++                let result = signal.wait_timeout(state, WAIT).unwrap();
++                assert!(!result.1.timed_out(), "worker notification lost");
++                state = result.0;
++            }
++            drop(state);
++            inbox.pass(|state, commits| {
++                take_in(state, commits);
++                true
++            });
++            done.send(()).unwrap();
++        })
++    };
++    waiting.recv_timeout(WAIT).unwrap();
++    inbox.enqueue(41);
++    if inbox.wake(|_| {}) {
++        signal.notify_all();
++    }
++    completed
++        .recv_timeout(WAIT)
++        .expect("sleeping worker did not wake");
++    worker.join().unwrap();
++    assert_eq!(*lock(inbox.state()), vec![41]);
++}
+diff --git a/crates/metal2vulkan-runtime/src/tests/left.rs b/crates/metal2vulkan-runtime/src/tests/left.rs
+index 2222b2f3..df099531 100644
+--- a/crates/metal2vulkan-runtime/src/tests/left.rs
++++ b/crates/metal2vulkan-runtime/src/tests/left.rs
+@@ -50,6 +50,7 @@ fn work(inbox: &Log, mut finds: impl FnMut(u32, &mut Left<u32>) -> bool) -> Opti
+ /// The first round leaves two checks, and a commit is left to it; so is another to the round
+ /// that takes that one in: the thread takes both in before it runs a check, not the second after
+ /// the first check.
++#[cfg(not(feature = "unixnu-deferred-submit"))]
+ #[test]
+ fn a_commit_left_to_the_thread_during_any_round_goes_before_its_next_piece_of_work() {
+     let inbox = Log::new(Vec::new());
+@@ -131,3 +132,30 @@ fn nothing_left_or_the_exit_ends_it() {
+     assert_eq!(exiting, None);
+     assert_eq!(ran, [(Check, 1)]);
+ }
++
++#[cfg(feature = "unixnu-deferred-submit")]
++#[test]
++fn continuous_commits_do_not_starve_checks() {
++    let inbox = Log::new(Vec::new());
++    let mut rounds = 0;
++    let mut ran = false;
++    let result = work_through(
++        &inbox,
++        |left| {
++            rounds += 1;
++            if rounds == 1 {
++                left.push(Check, 7);
++            }
++            inbox.enqueue(rounds);
++            true
++        },
++        |kind, value| {
++            assert_eq!((kind, value), (Check, 7));
++            ran = true;
++            true
++        },
++    );
++    assert_eq!(result, Some(true));
++    assert!(ran);
++    assert!(inbox.holds_commits());
++}
+diff --git a/crates/metal2vulkan-validation/Cargo.toml b/crates/metal2vulkan-validation/Cargo.toml
+index 4b129ead..cb881673 100644
+--- a/crates/metal2vulkan-validation/Cargo.toml
++++ b/crates/metal2vulkan-validation/Cargo.toml
+@@ -22,6 +22,9 @@ exclude = [
+     "**/*.spvasm",
+ ]
+ 
++[features]
++unixnu-deferred-submit = ["metal2vulkan-runtime/unixnu-deferred-submit"]
++
+ [dependencies]
+ # `cli` adds nothing validation uses (it builds the product's binary and enables `serde`), but with
+ # it the product's library here has the feature set of `cargo test -p metal2vulkan --all-features`,
+diff --git a/crates/metal2vulkan-validation/src/runtime_lane/queue_order.rs b/crates/metal2vulkan-validation/src/runtime_lane/queue_order.rs
+index bff2b0b8..b5026f8b 100644
+--- a/crates/metal2vulkan-validation/src/runtime_lane/queue_order.rs
++++ b/crates/metal2vulkan-validation/src/runtime_lane/queue_order.rs
+@@ -21,14 +21,18 @@ use super::degrade_notices::{assert_made_once, on_device};
+ use super::indirect_host_steps::{expected, Setup, HOST_STEPS};
+ use super::shared_kinds;
+ use super::{buffer_with, read_buffer, WAIT};
++#[cfg(not(feature = "unixnu-deferred-submit"))]
++use metal2vulkan_runtime::host_time;
+ use metal2vulkan_runtime::{
+-    host_time, Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, ResourceOptions,
+-    Submission, SubmissionCheck,
++    Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, ResourceOptions, Submission,
++    SubmissionCheck,
+ };
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::mpsc;
+ use std::sync::{Arc, Mutex};
+-use std::time::{Duration, Instant};
++use std::time::Duration;
++#[cfg(not(feature = "unixnu-deferred-submit"))]
++use std::time::Instant;
+ 
+ /// The bytes A's fill writes.
+ const FILLED: u8 = 0x5a;
+@@ -297,12 +301,14 @@ fn commits_made_while_another_thread_submits_return_at_once_and_run_in_commit_or
+ }
+ 
+ /// A check that lets every submission run.
++#[cfg(not(feature = "unixnu-deferred-submit"))]
+ fn passes() -> SubmissionCheck {
+     Arc::new(|_: &Submission<'_>| None)
+ }
+ 
+ /// How soon after the `VkQueue` is free the scheduler's thread submits the left command buffer, at
+ /// most: well under the 100 ms it sleeps for at a time.
++#[cfg(not(feature = "unixnu-deferred-submit"))]
+ const PROMPTLY: Duration = Duration::from_millis(40);
+ 
+ /// A command buffer with a submission check, committed while another thread's commit submits
+@@ -312,6 +318,7 @@ const PROMPTLY: Duration = Duration::from_millis(40);
+ /// not once that handler returned, nor when the scheduler's thread looks for work by itself. The
+ /// scheduler's thread is made to sleep afresh first (it checks and submits a command buffer), so
+ /// that it would look by itself only about 100 ms later.
++#[cfg(not(feature = "unixnu-deferred-submit"))]
+ #[test]
+ fn a_checked_command_buffer_left_to_another_thread_is_submitted_promptly() {
+     on_device(|device, _| {
+diff --git a/crates/metal2vulkan-validation/src/runtime_lane/submission_checks.rs b/crates/metal2vulkan-validation/src/runtime_lane/submission_checks.rs
+index e12b1521..22789002 100644
+--- a/crates/metal2vulkan-validation/src/runtime_lane/submission_checks.rs
++++ b/crates/metal2vulkan-validation/src/runtime_lane/submission_checks.rs
+@@ -208,13 +208,23 @@ fn a_commit_submits_its_batches_while_a_check_runs() {
+             .expect("the check runs on the scheduler thread");
+         let other = fill(&free, &free_bytes);
+         other.commit().unwrap();
+-        let ran = other.wait_until_completed_for(Duration::from_secs(10));
++        let ran = other.wait_until_completed_for(if cfg!(feature = "unixnu-deferred-submit") {
++            Duration::from_millis(100)
++        } else {
++            Duration::from_secs(10)
++        });
+         let status = other.status();
+         release.send(()).unwrap();
+         held.wait_until_completed_for(WAIT).unwrap();
+         assert_eq!(held.status(), CommandBufferStatus::Completed);
+-        assert!(ran.is_ok(), "the commit waited for the check: {status:?}");
+-        assert_eq!(status, CommandBufferStatus::Completed);
++        if cfg!(feature = "unixnu-deferred-submit") {
++            assert!(ran.is_err(), "worker submitted while its check was blocked");
++            other.wait_until_completed_for(WAIT).unwrap();
++        } else {
++            assert!(ran.is_ok(), "the commit waited for the check: {status:?}");
++            assert_eq!(status, CommandBufferStatus::Completed);
++        }
++        assert_eq!(other.status(), CommandBufferStatus::Completed);
+         assert_eq!(read_buffer(&free_bytes, 0, 256).unwrap(), vec![0x5a; 256]);
+     });
+ }
+diff --git a/crates/metal2vulkan-validation/src/runtime_lane/submission_handlers.rs b/crates/metal2vulkan-validation/src/runtime_lane/submission_handlers.rs
+index 8ce5512e..f32cd0ba 100644
+--- a/crates/metal2vulkan-validation/src/runtime_lane/submission_handlers.rs
++++ b/crates/metal2vulkan-validation/src/runtime_lane/submission_handlers.rs
+@@ -186,6 +186,9 @@ fn a_commit_that_submits_runs_them_in_order_before_it_returns() {
+                     }
+                     completed(&command_buffer);
+                     println!("{case}: attempt {attempt} was handed off");
++                    if cfg!(feature = "unixnu-deferred-submit") {
++                        break;
++                    }
+                     continue;
+                 }
+                 assert!(calls.len() >= 3, "{case}: {calls:?}");
+@@ -323,9 +326,16 @@ fn a_command_buffer_a_gpu_signal_releases_runs_them_in_the_signaller_s_commit()
+             .unwrap();
+         assert!(log.calls().is_empty());
+         signaller.commit().unwrap();
++        if cfg!(feature = "unixnu-deferred-submit") {
++            waiting.wait_until_scheduled().unwrap();
++        }
+         assert_eq!(log.names(), ["signaller submitted", "waiting submitted"]);
+         for call in log.calls() {
+-            assert_eq!(call.thread, thread::current().id(), "{}", call.name);
++            if cfg!(feature = "unixnu-deferred-submit") {
++                assert_ne!(call.thread, thread::current().id(), "{}", call.name);
++            } else {
++                assert_eq!(call.thread, thread::current().id(), "{}", call.name);
++            }
+         }
+         completed(&signaller);
+         completed(&waiting);
+@@ -345,8 +355,15 @@ fn a_command_buffer_committed_as_failed_runs_them() {
+             .add_submission_handler(log.handler("submitted"))
+             .unwrap();
+         command_buffer.commit_failed(CommitFailure::new(8)).unwrap();
++        if cfg!(feature = "unixnu-deferred-submit") {
++            command_buffer.wait_until_completed_for(WAIT).unwrap();
++        }
+         assert_eq!(log.names(), ["submitted"]);
+-        assert_eq!(log.call("submitted").thread, thread::current().id());
++        if cfg!(feature = "unixnu-deferred-submit") {
++            assert_ne!(log.call("submitted").thread, thread::current().id());
++        } else {
++            assert_eq!(log.call("submitted").thread, thread::current().id());
++        }
+         command_buffer.wait_until_completed_for(WAIT).unwrap();
+         assert_eq!(command_buffer.status(), CommandBufferStatus::Error);
+     });
+diff --git a/docs/FAST-PATHS.md b/docs/FAST-PATHS.md
+index 2951be2e..493e306e 100644
+--- a/docs/FAST-PATHS.md
++++ b/docs/FAST-PATHS.md
+@@ -118,6 +118,10 @@ driver's. Each is open work.
+   each timed command buffer writes: on an M4 a bare barrier took 14.7 µs alone and 167.8 µs with
+   them. `DeviceOptions::gpu_times_from_host` (off by default, announced) answers GPU times from the
+   host clock and spares them.
++- **An optional deferred scheduler.** `unixnu-deferred-submit` hands commits to the scheduler worker.
++  Commit does not run a submission pass; its worker can still be delayed by a long submission,
++  check or handler. This opt-in is intended for measured driver integrations and does not change
++  GPU rendering into CPU rendering.
+ - **A commit can wait for the driver's submission.** Where the device's scheduler is free (no host
+   step or submission check pending), `commit` submits the command buffer's ready batches itself,
+   on the committing thread, so that no thread wake lies on their path (`scheduler/mod.rs`). A
+@@ -128,8 +132,8 @@ driver's. Each is open work.
+   (3.5 to 7.6 ms on the CPU, none of it waiting to run). Mostly the GPU ran the command buffer's
+   work within 0.1 ms of the call's start, and the one committed before it was seen complete 0.1 ms
+   after its own commit (its completed handler ran then); once, the work started only as the call
+-  returned. Handing each commit's submission to the scheduler thread, or doing so once a device's
+-  submission has stalled, would return at once; it is not built.
++  returned. The opt-in `unixnu-deferred-submit` feature hands submission to the scheduler worker;
++  commit can still wait in earlier preparation and synchronization.
+ - **A view of another format without `PixelFormatView` usage** is a shadow image whose texels are
+   copied at each use (`shadowed-texture-view`): about 50 to 95 µs a command buffer for a 64x64
+   texture, measured on the M3 Max and M4 (MoltenVK) and the Radeon 780M. Making the texture with
