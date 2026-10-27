@@ -186,6 +186,9 @@ bool nmb_command_buffer_on_completed(NmbCommandBuffer *, void (*handler)(void *c
 bool nmb_command_buffer_on_scheduled(NmbCommandBuffer *, void (*handler)(void *context), void *context);
 bool nmb_command_buffer_commit(NmbCommandBuffer *);
 #if defined(NMB_RUNTIME_COMMIT_TRACE)
+/* clock: nonblocking, non-reentrant, no runtime calls or exceptions; may run
+ * under a runtime lock. sink: nonblocking, non-reentrant, no runtime calls or
+ * exceptions; invoked after the synchronous commit returns, before this call returns. */
 bool nmb_command_buffer_commit_profiled(NmbCommandBuffer *, uint64_t,
     uint64_t (*clock)(void), void (*sink)(uint32_t, uint64_t, uint64_t));
 #endif
