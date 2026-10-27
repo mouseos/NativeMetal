@@ -158,7 +158,7 @@ assert 'swap.width, swap.height}, copyTrace_)' in client
 plugin=(root/'NativeVulkanMetalPlugin.mm').read_text()
 assert 'diag && !strcmp(diag, "1")' in plugin
 assert 'if (gCopyTraceEnabled)' in plugin
-assert 'transport, &st, gCopyTraceEnabled, &gCopyTrace)' in plugin
+assert 'transport, &st, gCopyTraceEnabled, &gCopyTrace,' in plugin
 assert len('CT i4294967295 n4294967295 c4294967295 w4294967295') <= 62
 assert len('CE p5 q4294967295 b4294967295 t4294967295')<=62
 assert len('CX x4294967295 e4294967295')<=62
@@ -184,6 +184,12 @@ mock = r"""
 #include <cstring>
 static gpupresent::CopyTrace gCopyTrace;
 static bool gCopyTraceEnabled=true;
+static bool gUiLatencyEnabled=false;
+static bool native_bridge_metal_latency_event(uint64_t *){return false;}
+static uint64_t native_bridge_metal_latency_lost(){return 0;}
+static unsigned getpid(){return 1;}
+struct mach_timebase_info_data_t {unsigned numer,denom;};
+static void mach_timebase_info(mach_timebase_info_data_t *p){p->numer=p->denom=1;}
 static unsigned virtualSeconds=0,statusLines=0,copyLines=0,lastPair=0;
 static uint64_t copyClockUs() { return uint64_t(virtualSeconds)*1000000; }
 static uint32_t copyMs(uint64_t us) { return us/1000>UINT32_MAX ? UINT32_MAX : us/1000; }

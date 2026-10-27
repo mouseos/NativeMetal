@@ -13,6 +13,12 @@ id native_bridge_metal_open(const char *loader, const char *cache, uint64_t regi
 id native_bridge_metal_library_with_air(const void *bytes, size_t length);
 // One line for the plugin's status report: command buffers committed/failed locally, pipelines made, refusals, the last refusal's text.
 size_t native_bridge_metal_status(char *out, size_t size);
+// Default off. Enable before device publication. Raw mach_absolute_time ticks;
+// drain only from the status thread, never from commit/completion callbacks.
+void native_bridge_metal_enable_latency(bool enabled);
+void native_bridge_metal_latency_record(uint32_t kind,uint64_t id,uint64_t tick);
+bool native_bridge_metal_latency_event(uint64_t out[4]);
+uint64_t native_bridge_metal_latency_lost(void);
 // Optional diagnostic, null by default. Install before device publication. The
 // first two render-pipeline failures call it synchronously, outside telemetry
 // locks; strings are borrowed only for the call. It never changes the result.

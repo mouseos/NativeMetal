@@ -82,6 +82,12 @@ static void mark(uint32_t value) {native_metal_board_mark(value);}
 // First copy only, enabled by the existing board pipeline diagnostic policy.
 static gpupresent::CopyTrace gCopyTrace;
 static bool gCopyTraceEnabled = false;
+static bool gUiLatencyEnabled = false;
+static void configureUiLatency(bool server) {
+ const char *value=getenv("PVR_METAL_LATENCY_DIAG");
+ gUiLatencyEnabled=server && value && !strcmp(value,"1");
+ native_bridge_metal_enable_latency(gUiLatencyEnabled);
+}
 static uint64_t copyClockUs() {
     static const mach_timebase_info_data_t base = [] { mach_timebase_info_data_t b{}; mach_timebase_info(&b); return b; }();
     const uint64_t ticks = mach_absolute_time();
@@ -232,7 +238,8 @@ static void serveScanout(id device) {
     }
     gpuscanout::Stats st = {};
     gpuscanout::Client client;
-    const bool opened = client.open((id<MTLDevice>)device, transport, &st, gCopyTraceEnabled, &gCopyTrace);
+    const bool opened = client.open((id<MTLDevice>)device, transport, &st, gCopyTraceEnabled, &gCopyTrace,
+        gUiLatencyEnabled ? native_bridge_metal_latency_record : nullptr);
     say("P%d e%x", st.step, (unsigned)st.error);
     if (!opened) return;
     uint64_t reportedFrames = 0, reportedFailures = 0;
@@ -265,9 +272,20 @@ static void startServerThreads() {
         for (;;) {
             // Until the first copy returns, opt-in observation must precede the
             // family's five-second timeout. Normal ST/PUB cadence stays 20 s.
-            const unsigned seconds = gCopyTraceEnabled && !copyReturned ? 1 : 20-statusSeconds;
+            const unsigned seconds = gUiLatencyEnabled || (gCopyTraceEnabled && !copyReturned) ? 1 : 20-statusSeconds;
             sleep(seconds);
             statusSeconds += seconds;
+            if(gUiLatencyEnabled) {
+                static bool clockShown=false;
+                if(!clockShown) {mach_timebase_info_data_t base={};mach_timebase_info(&base);
+                    say("UIL p%u clock n%u d%u",(unsigned)getpid(),base.numer,base.denom);clockShown=true;}
+                uint64_t e[4];
+                for(unsigned n=0;n<256 && native_bridge_metal_latency_event(e);++n)
+                    say("UIL p%u e%u i%llx t%llx",(unsigned)getpid(),(unsigned)e[2],
+                        (unsigned long long)e[1],(unsigned long long)e[0]);
+                static uint64_t lost=0;const uint64_t current=native_bridge_metal_latency_lost();
+                if(current!=lost) {say("UIL lost %llu",(unsigned long long)current);lost=current;}
+            }
             if (gCopyTraceEnabled) {
                 const auto copy = gCopyTrace.snapshot(copyClockUs());
                 copyReturned = copy.returned;
@@ -376,12 +394,14 @@ static id deviceForPort(unsigned port) {
         if (!requested(".publish")) {
             if (server && requested(".selftest")) {
                 native_metal_board_prepare(port);
+                configureUiLatency(false);
                 startSelftest();
             }
             return nil;
         }
         if (!server && !listedClient()) return nil;
         native_metal_board_prepare(port);
+        configureUiLatency(server);
         device = openDevice(port, server);
         if (device && server) {
             gServerDevice = device;

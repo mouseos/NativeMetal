@@ -74,3 +74,33 @@ The latter executes production serveOne, comparison and publication code with
 completion that destroys the original mapping contents, capture/completion
 failures, the attempt cap and default-off operation. Metal API syntax is mocked;
 real GPU snapshot legality/coherency and deadline margin remain hardware checks.
+
+## Optional input/render/handoff timestamp correlation
+
+`PVR_METAL_LATENCY_DIAG=1` enables backboardd-only tracing in the Vulkan plugin.
+It is independent of pipeline/readback diagnostics and is off by default.
+Client processes and selftest-only mode do not enable this queue: their render
+activity is outside this instrument's scope. `UIL p<pid> clock n<numer> d<denom>`
+reports the conversion for raw `mach_absolute_time()` ticks. Lines use hexadecimal
+IDs and ticks: `UIL p<pid> e<event> i<id> t<tick>`.
+
+Events 10/12/11 are render-pass command commit entry/successful commit return/
+runtime completion callback. 20/22/21 are the corresponding non-render command
+events (including blit/compute). These are command-buffer IDs, not UI frame IDs.
+Callback may precede submit return; sort by captured tick, never UART line order.
+41 is successful WAIT_SWAP return; 42/43 bracket COMPLETE_SWAP with swap IDs.
+42/43 and the kernel's matching receive event allow a bounded clock-offset
+calibration without extra ioctls, memory reads or I/O on the recorded hot paths.
+
+A fixed 256-record try-lock queue drops rather than blocks under contention or
+saturation. The existing status thread drains at most 256 records each second;
+ST/PUB remain on their 20-second cadence. `UIL lost` is a cumulative loss count.
+Missing endpoints remain unmeasured; these diagnostics are not a throughput
+benchmark and their logging cost must be accounted for. Recording does no
+formatting, logging, allocation or waits. Default-off adds no observer work.
+
+Use the device repository's `--ui-latency` bundle option together with the
+`native-ui-latency=1` kernel argument and its offline analyzer. The matching
+NativeMobileDisplay observer and board Input source must also be built. Input,
+command-buffer and swap IDs are independent: a nearby subsequent commit is only
+a temporal candidate, never proof that a specific touch caused that frame.

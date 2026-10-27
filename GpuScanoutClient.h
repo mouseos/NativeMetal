@@ -40,7 +40,9 @@ class Client {
 public:
     // Reads the mode and maps the scanout; false with stats.step telling where it stopped. verifyFrames is the caller's
     // diagnostic choice (off by default); it is not reset here so a pre-configured Stats survives open().
-    bool open(id<MTLDevice> device, const Transport &transport, Stats *stats, bool verifyFrames = false, gpupresent::CopyTrace *copyTrace = nullptr) {
+    bool open(id<MTLDevice> device, const Transport &transport, Stats *stats, bool verifyFrames = false, gpupresent::CopyTrace *copyTrace = nullptr,
+              void (*latency)(uint32_t,uint64_t,uint64_t) = nullptr) {
+        latency_ = latency;
         copyTrace_ = copyTrace;
         transport_ = transport;
         stats_ = stats;
@@ -87,6 +89,7 @@ public:
             stats_->error = status;
             return false;
         }
+        if(latency_)latency_(41,swap.sequence,mach_absolute_time());
         const size_t page = (size_t)getpagesize();
         note(0x6730);   // a frame was offered
         const uint64_t began = mach_absolute_time();
@@ -105,7 +108,9 @@ public:
                 (size_t)((swap.bytes + page - 1) & ~(page - 1)), (size_t)swap.stride, swap.width, swap.height});
         note(0x6731);   // the GPU copy returned
         NGPComplete done = {swap.sequence, r == gpupresent::kOk ? 0u : 0xe00002bcu /* kIOReturnError */, 0};
+        if(latency_)latency_(42,swap.sequence,mach_absolute_time());
         const int completed = transport_.call(transport_.context, NGP_METHOD_COMPLETE_SWAP, &done, sizeof done, nullptr, 0);
+        if(latency_)latency_(43,swap.sequence,mach_absolute_time());
         if (completed) {++stats_->failures; stats_->error = completed; return false;}
         if (r == gpupresent::kOk) ++stats_->frames; else ++stats_->failures;
         if (captured) presenter_->compareVerificationAsync();
@@ -113,6 +118,7 @@ public:
     }
 private:
     gpupresent::CopyTrace *copyTrace_ = nullptr;
+    void (*latency_)(uint32_t,uint64_t,uint64_t) = nullptr;
     bool verificationReady_ = false;
     unsigned verificationAttempts_ = 0;
     void note(uint32_t value) {if (transport_.mark) transport_.mark(transport_.context, value);}

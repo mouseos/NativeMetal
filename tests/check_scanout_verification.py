@@ -43,6 +43,7 @@ complete=true;for(auto &x:live)x=999;return completeOK?0:1;
 }
 struct Client{
 Stats *stats_;Transport transport_;gpupresent::Presenter *presenter_;gpupresent::CopyTrace *copyTrace_=nullptr;
+void (*latency_)(uint32_t,uint64_t,uint64_t)=nullptr;
 bool verificationReady_=true;unsigned verificationAttempts_=0;void note(unsigned){}
 SERVE
 };

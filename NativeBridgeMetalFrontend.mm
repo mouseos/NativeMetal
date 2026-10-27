@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#include "UiLatencyTrace.h"
+#include <mach/mach_time.h>
 // Native Metal API frontend over the bridge (bridge/NativeMetalObjects.h): the metal2vulkan runtime on Turnip, on the Adreno 740 through
 // NativeAdreno. Same shape as the offline frontend: the device is a dynamically allocated subclass of the target's own _MTLDevice that
 // only adds this file's implementations; every other object is an own class answering the Metal protocol methods it implements.
@@ -107,6 +109,20 @@ static std::atomic<uint64_t> gSurfaceFlushBytes,gSurfaceFlushDuplicates;
 struct EncodedWork {uint32_t passes,draws,dispatches,blits;uint64_t pixels;};
 struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t scheduledUs=-1;uint32_t index=0;EncodedWork work={};};
 static CommitRecord gCommitRing[32];
+static std::atomic<bool> gUiLatencyEnabled{false};
+static uilatency::Trace gUiLatency;
+static void uiLatency(unsigned kind,uint64_t id,unsigned work,uint64_t tick=0) {
+ if(gUiLatencyEnabled.load(std::memory_order_relaxed))
+  gUiLatency.push({tick?tick:mach_absolute_time(),id,kind,work});
+}
+extern "C" void native_bridge_metal_latency_record(uint32_t kind,uint64_t id,uint64_t tick) {uiLatency(kind,id,0,tick);}
+extern "C" void native_bridge_metal_enable_latency(bool enabled) {gUiLatencyEnabled.store(enabled);}
+extern "C" bool native_bridge_metal_latency_event(uint64_t out[4]) {
+ uilatency::Event e;if(!out || !gUiLatencyEnabled.load() || !gUiLatency.pop(e))return false;
+ out[0]=e.tick;out[1]=e.id;out[2]=e.kind;out[3]=e.work;return true;
+}
+extern "C" uint64_t native_bridge_metal_latency_lost(void) {return gUiLatency.lost();}
+
 static std::mutex gCommitLock;
 static std::mutex gProblemLock;
 static char gLastProblems[2][200];
@@ -1002,6 +1018,7 @@ static void scheduled(void *context);
 - (void)commit {
  if(self.committed){NBLOG(@"native-metal: commit twice");return;}
  self.committed=YES;
+ const uint64_t latencyBegan=gUiLatencyEnabled.load(std::memory_order_relaxed)?mach_absolute_time():0;
  self.committedUs=nowUs();
  {
   std::lock_guard<std::mutex> lock(gCommitLock);
@@ -1010,6 +1027,7 @@ static void scheduled(void *context);
   CommitRecord &r=gCommitRing[index%32];
   r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
  }
+ uiLatency(encodedWork.passes?10:20,self.commitIndex,encodedWork.draws,latencyBegan);
  dispatch_group_enter(_handlers);
  dispatch_group_enter(_schedulingHandlers);
  @synchronized(gInFlight){[gInFlight addObject:self];}
@@ -1018,7 +1036,9 @@ static void scheduled(void *context);
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
   void *context=(__bridge_retained void *)self;
   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
-     nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle))return;
+     nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle)) {
+   uiLatency(encodedWork.passes?12:22,self.commitIndex,encodedWork.draws);return;
+  }
   (void)CFBridgingRelease(context);   // refused registration/commit cannot call the registered handlers
   [self refuse:[@"commit: " stringByAppendingString:lastError()]];
  }
@@ -1047,6 +1067,7 @@ static void scheduled(void *context) {[(__bridge NBCommandBuffer *)context didSc
 static void completed(void *context) {
  gCompleted++;
  NBCommandBuffer *commandBuffer=(__bridge_transfer NBCommandBuffer *)context;
+ uiLatency(commandBuffer->encodedWork.passes?11:21,commandBuffer.commitIndex,commandBuffer->encodedWork.draws);
  {
   const uint64_t took=nowUs()-commandBuffer.committedUs;
   gTimeEncodeToCommit.count++;gTimeEncodeToCommit.total+=took;
