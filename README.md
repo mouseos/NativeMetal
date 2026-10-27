@@ -87,6 +87,10 @@ IDs and ticks: `UIL p<pid> e<event> i<id> t<tick>`.
 Events 10/12/11 are render-pass command commit entry/successful commit return/
 runtime completion callback. 20/22/21 are the corresponding non-render command
 events (including blit/compute). These are command-buffer IDs, not UI frame IDs.
+For render commands, 13 and 14 bracket the pre-commit surface cache flush;
+10–13 includes frontend setup, 13–14 includes the flush and scheduling, and
+14–12 includes callback registration and the runtime commit. A missing 12
+can mean submission was refused or an event was dropped; it is not a duration.
 Callback may precede submit return; sort by captured tick, never UART line order.
 41 is successful WAIT_SWAP return; 42/43 bracket COMPLETE_SWAP with swap IDs.
 42/43 and the kernel's matching receive event allow a bounded clock-offset

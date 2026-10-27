@@ -38,4 +38,12 @@ with tempfile.TemporaryDirectory() as d:
  subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-pthread','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(r),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)
 assert 'PVR_METAL_LATENCY_DIAG' in (r/'NativeVulkanMetalPlugin.mm').read_text()
+commit=s[s.index('- (void)commit {'):s.index('- (void)waitUntilCompleted {')]
+enter=commit.index('uiLatency(encodedWork.passes?10:20')
+before=commit.index('if(encodedWork.passes)uiLatency(13')
+flush=commit.index('flushSurfaces(_surfaces)')
+after=commit.index('if(encodedWork.passes)uiLatency(14')
+submit=commit.index('nmb_command_buffer_commit(_handle)')
+end=commit.index('uiLatency(encodedWork.passes?12:22')
+assert enter < before < flush < after < submit < end
 print('PASS actual frontend hooks default-off/raw timestamps and bounded MPSC queue/drop accounting')

@@ -1032,7 +1032,9 @@ static void scheduled(void *context);
  dispatch_group_enter(_schedulingHandlers);
  @synchronized(gInFlight){[gInFlight addObject:self];}
  if(!self.encodeFailure) {
+  if(encodedWork.passes)uiLatency(13,self.commitIndex,encodedWork.draws);
   flushSurfaces(_surfaces);
+  if(encodedWork.passes)uiLatency(14,self.commitIndex,encodedWork.draws);
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
   void *context=(__bridge_retained void *)self;
   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
