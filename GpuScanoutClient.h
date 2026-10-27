@@ -99,11 +99,11 @@ public:
             stats_->totalMs += stats_->lastMs;
         }
         stats_->lastResult = (int)r;
+        note(0x6731);   // the GPU copy returned
         const bool capture = r == gpupresent::kOk && verificationReady_ && verificationAttempts_ < 4 && presenter_->verificationAvailable();
         if (capture) ++verificationAttempts_;
         const bool captured = capture && presenter_->captureVerification({(const void *)(uintptr_t)swap.address,
                 (size_t)((swap.bytes + page - 1) & ~(page - 1)), (size_t)swap.stride, swap.width, swap.height});
-        note(0x6731);   // the GPU copy returned
         NGPComplete done = {swap.sequence, r == gpupresent::kOk ? 0u : 0xe00002bcu /* kIOReturnError */, 0};
         const int completed = transport_.call(transport_.context, NGP_METHOD_COMPLETE_SWAP, &done, sizeof done, nullptr, 0);
         if (completed) {++stats_->failures; stats_->error = completed; return false;}

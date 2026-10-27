@@ -1671,6 +1671,13 @@ pub extern "C" fn nmb_compute_encoder_new(command_buffer: *mut NmbCommandBuffer)
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nmb_encoder_open_trace_set(callback: Option<metal2vulkan_runtime::encoder_open_trace::EncoderOpenCallback>,
+                                             context: *mut std::ffi::c_void) {
+    // SAFETY: the C caller must keep the callback/context alive until it clears the thread-local hook.
+    unsafe { metal2vulkan_runtime::encoder_open_trace::set_encoder_open_callback(callback, context) };
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nmb_blit_encoder_new(command_buffer: *mut NmbCommandBuffer) -> *mut NmbEncoder {
     guard(std::ptr::null_mut(), || Ok(boxed(NmbEncoder::Blit(get(command_buffer)?.0.blit_command_encoder().map_err(e("blit encoder"))?))))
 }

@@ -2,7 +2,7 @@
 //! Native Metal bridge: the metal2vulkan runtime (the Metal API on Vulkan) over Turnip, behind a C ABI the Objective-C
 //! Metal frontend and the plugin's self-test call. Turnip is opened as the runtime's Vulkan "loader" (it exports
 //! vkGetInstanceProcAddr; iPadOS has no Khronos loader). The pinned runtime is GPL-2.0-or-later OR LGPL-3.0-or-later and is
-//! linked unmodified from its own source; nothing of it is copied here.
+//! built from its pinned source with recorded patches; nothing of it is copied here.
 //!
 //! The self-test runs real Metal-level work and checks the GPU's results: a compute kernel, a render pass, a render into
 //! host pages imported without a copy (the IOSurface path), and translation of the target's own QuartzCore library into

@@ -252,7 +252,7 @@ static void serveScanout(id device) {
 static id gServerDevice;
 static void startServerThreads() {
     const char *diag = getenv("PVR_METAL_PIPELINE_DIAG");
-    if (diag && !strcmp(diag, "1")) { gCopyTrace.configure(copyClockUs); gCopyTraceEnabled = true; }
+    if (diag && !strcmp(diag, "1")) { gCopyTrace.configure(copyClockUs); gCopyTrace.configureEncoder(nmb_encoder_open_trace_set); gCopyTraceEnabled = true; }
     pthread_attr_t attributes;
     pthread_attr_init(&attributes);
     pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
@@ -260,7 +260,7 @@ static void startServerThreads() {
     pthread_t thread;
     // The status line every 20 s: the formats asked for, then the bridge's counters in 57-character pieces.
     pthread_create(&thread, &attributes, [](void *) -> void * {
-        unsigned phase = 0, statusSeconds = 0, reports = 0, lastCopyPhase = 0;
+        unsigned phase = 0, statusSeconds = 0, reports = 0, lastCopyPhase = 0, lastEncoderMask = 0;
         bool lastReturned = false, copyReturned = false;
         for (;;) {
             // Until the first copy returns, opt-in observation must precede the
@@ -269,9 +269,13 @@ static void startServerThreads() {
             sleep(seconds);
             statusSeconds += seconds;
             if (gCopyTraceEnabled) {
-                const auto copy = gCopyTrace.snapshot(copyClockUs());
+                const uint64_t encoderNow = copyClockUs();
+                const auto copy = gCopyTrace.snapshot(encoderNow);
+                // Sample after the snapshot: a concurrent event may have been
+                // published after encoderNow but before the mask was read.
+                const uint64_t intervalNow = copyClockUs();
                 copyReturned = copy.returned;
-                if (copy.phase && ((!copy.returned && reports < 8) || copy.phase != lastCopyPhase || copy.returned != lastReturned)) {
+                if (copy.phase && ((!copy.returned && reports < 8) || copy.phase != lastCopyPhase || copy.returned != lastReturned || copy.encoderMask != lastEncoderMask)) {
                     say("CG w%llu h%llu a%llu r%u", (unsigned long long)copy.geometry[0],
                         (unsigned long long)copy.geometry[1], (unsigned long long)copy.geometry[4], copy.route);
                     say("CS s%llu d%llu", (unsigned long long)copy.geometry[2], (unsigned long long)copy.geometry[3]);
@@ -281,7 +285,14 @@ static void startServerThreads() {
                     say("CE p%u q%u b%u t%u", copy.encodePhase, copyMs(copy.encoding[0]),
                         copyMs(copy.encoding[1]), copyMs(copy.encoding[2]));
                     say("CX x%u e%u", copyMs(copy.encoding[3]), copyMs(copy.encoding[4]));
-                    ++reports; lastCopyPhase = copy.phase; lastReturned = copy.returned;
+                    const auto duration = [&](unsigned a, unsigned b) -> uint32_t {
+                        return gpupresent::CopyTrace::encoderIntervalUs(copy, a, b, intervalNow);
+                    };
+                    say("EL m%08x l%u p%u", copy.encoderMask, duration(1,2), duration(3,4));
+                    say("EP r%u c%u", duration(7,8), duration(9,10));
+                    say("EA a%u b%u", duration(12,13), duration(14,15));
+                    say("ES s%u f%u", duration(24,25), duration(1,22));
+                    ++reports; lastCopyPhase = copy.phase; lastReturned = copy.returned; lastEncoderMask = copy.encoderMask;
                 }
             }
             if (statusSeconds < 20) continue;

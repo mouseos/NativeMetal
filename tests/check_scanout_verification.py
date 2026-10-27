@@ -78,6 +78,12 @@ with tempfile.TemporaryDirectory() as directory:
  subprocess.run([str(t/'test')],check=True)
 # Capture must finish before lease release; CPU comparison must follow successful release.
 assert serve.index('captureVerification')<serve.index('NGP_METHOD_COMPLETE_SWAP')<serve.index('compareVerificationAsync')
+capture=p[p.index('    bool captureVerification('):p.index('    void compareVerificationAsync(')]
+present=p[p.index('    Result present('):]
+assert 'encoderEnter' not in capture and 'encoderLeave' not in capture
+assert present.index('EncoderTraceScope encoderTrace') < present.index('[commands blitCommandEncoder]') < present.index('trace->encoded(2)')
+assert serve.index('presenter_->present(') < serve.index('captureVerification')
+assert serve.index('presenter_->present(') < serve.index('note(0x6731)') < serve.index('captureVerification')
 assert 'volatile uint32_t' not in c
 assert c.index('prepareVerification()')<c.index('bool serveOne(')
 print('PASS: actual serveOne/comparator/publication; destructive completion, mismatch rows, failure paths, four-attempt cap, default off; ASan/UBSan')

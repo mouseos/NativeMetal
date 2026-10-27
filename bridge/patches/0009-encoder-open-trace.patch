@@ -1,0 +1,162 @@
+diff --git a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+index 8b3a0c25..e03fb389 100644
+--- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+@@ -2335,6 +2335,7 @@ impl CommandBufferShared {
+     ) -> Result<vk::CommandBuffer, Error> {
+         let device = &self.device;
+         let raw = device.shared().vk();
++        if state.pool.is_some() { crate::encoder_open_trace::mark(23); }
+         if state.pool.is_none() {
+             let family = device.shared().queue_family_of(self.queue.vk_queue());
+             let pool = match device
+@@ -2348,7 +2349,10 @@ impl CommandBufferShared {
+                         .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+                         .queue_family_index(family);
+                     // SAFETY: the device is live and `info` valid.
++                    crate::encoder_open_trace::mark(9);
+                     let pool = unsafe { raw.create_command_pool(&info, None) };
++                    crate::encoder_open_trace::mark(10);
++                    if pool.is_err() { crate::encoder_open_trace::mark(19); }
+                     exit_guard::called(Call::CreateCommandPool);
+                     device.shared().counts.command_pool_made();
+                     CommandPool::new(pool.map_err(vulkan)?, family)
+@@ -2360,13 +2364,18 @@ impl CommandBufferShared {
+             return Err(internal("a command buffer without its command pool"));
+         };
+         if let Some(buffer) = pool.reuse(level) {
++            crate::encoder_open_trace::mark(11);
+             return Ok(buffer);
+         }
+         let info = vk::CommandBufferAllocateInfo::default()
+             .command_pool(pool.raw)
+             .level(level)
+             .command_buffer_count(1);
+-        let buffer = device.allocate_command_buffers(&info)?[0];
++        crate::encoder_open_trace::mark(12);
++        let allocated = device.allocate_command_buffers(&info);
++        crate::encoder_open_trace::mark(13);
++        if allocated.is_err() { crate::encoder_open_trace::mark(20); }
++        let buffer = allocated?[0];
+         pool.made(level, buffer);
+         Ok(buffer)
+     }
+diff --git a/crates/metal2vulkan-runtime/src/encoder.rs b/crates/metal2vulkan-runtime/src/encoder.rs
+index 1194f785..c1d96e7d 100644
+--- a/crates/metal2vulkan-runtime/src/encoder.rs
++++ b/crates/metal2vulkan-runtime/src/encoder.rs
+@@ -243,8 +243,11 @@ impl EncoderCore {
+         call: &'static str,
+         ordered: bool,
+     ) -> Result<EncoderCore, Error> {
++        crate::encoder_open_trace::mark(1);
+         let mut state = command_buffer.state();
++        crate::encoder_open_trace::mark(2);
+         if let Some(problem) = state.refusal() {
++            crate::encoder_open_trace::mark(17);
+             return Err(invalid(call, problem));
+         }
+         let raw = command_buffer.allocate_raw(&mut state)?;
+@@ -252,7 +255,11 @@ impl EncoderCore {
+         let begin = vk::CommandBufferBeginInfo::default()
+             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+         // SAFETY: the command buffer was just allocated from the pool, under the state lock.
+-        unsafe { device.begin_command_buffer(raw, &begin) }.map_err(vulkan)?;
++        crate::encoder_open_trace::mark(14);
++        let began = unsafe { device.begin_command_buffer(raw, &begin) };
++        crate::encoder_open_trace::mark(15);
++        if began.is_err() { crate::encoder_open_trace::mark(21); }
++        began.map_err(vulkan)?;
+         command_buffer
+             .device()
+             .shared()
+@@ -265,6 +272,7 @@ impl EncoderCore {
+             .shared()
+             .identifiers
+             .encoder_opened();
++        crate::encoder_open_trace::mark(22);
+         Ok(EncoderCore {
+             open: OpenGuard {
+                 command_buffer: command_buffer.clone(),
+diff --git a/crates/metal2vulkan-runtime/src/encoder_open_trace.rs b/crates/metal2vulkan-runtime/src/encoder_open_trace.rs
+new file mode 100644
+index 00000000..af0df2bf
+--- /dev/null
++++ b/crates/metal2vulkan-runtime/src/encoder_open_trace.rs
+@@ -0,0 +1,28 @@
++//! Per-thread, opt-in encoder-open boundary callback. No clock or allocation here.
++use std::cell::Cell;
++use std::ffi::c_void;
++
++/// Called for a boundary on the encoder-opening thread.
++pub type EncoderOpenCallback = unsafe extern "C" fn(*mut c_void, u32);
++thread_local! {
++    static CALLBACK: Cell<Option<(EncoderOpenCallback, *mut c_void)>> = const { Cell::new(None) };
++}
++
++/// Installs a callback on the current thread. Clear it before its context expires.
++///
++/// # Safety
++/// The context and callback must remain valid on this thread until cleared;
++/// the callback must not unwind or re-enter encoder creation.
++pub unsafe fn set_encoder_open_callback(callback: Option<EncoderOpenCallback>, context: *mut c_void) {
++    let _ = CALLBACK.try_with(|slot| slot.set(callback.map(|f| (f, context))));
++}
++
++#[inline]
++pub(crate) fn mark(event: u32) {
++    let _ = CALLBACK.try_with(|slot| {
++        if let Some((callback, context)) = slot.get() {
++            // SAFETY: the installer guarantees callback and context remain live until cleared.
++            unsafe { callback(context, event) };
++        }
++    });
++}
+diff --git a/crates/metal2vulkan-runtime/src/lib.rs b/crates/metal2vulkan-runtime/src/lib.rs
+index 4781491b..b8266ca9 100644
+--- a/crates/metal2vulkan-runtime/src/lib.rs
++++ b/crates/metal2vulkan-runtime/src/lib.rs
+@@ -77,6 +77,7 @@ mod dynamic_library;
+ mod dynamic_state;
+ mod enables;
+ mod encoder;
++pub mod encoder_open_trace;
+ mod error;
+ mod event;
+ mod event_timeline;
+diff --git a/crates/metal2vulkan-runtime/src/spares.rs b/crates/metal2vulkan-runtime/src/spares.rs
+index 39ac4d85..6d5fb8c2 100644
+--- a/crates/metal2vulkan-runtime/src/spares.rs
++++ b/crates/metal2vulkan-runtime/src/spares.rs
+@@ -122,19 +122,30 @@ impl Spares {
+         family: u32,
+     ) -> Result<Option<CommandPool>, Error> {
+         if exit_guard::in_section() {
++            crate::encoder_open_trace::mark(16);
+             return Ok(None);
+         }
+-        let Some(mut pool) = take_command_pool(&mut lock(&self.command_pools), family) else {
++        crate::encoder_open_trace::mark(3);
++        let mut pools = lock(&self.command_pools);
++        crate::encoder_open_trace::mark(4);
++        let selected = take_command_pool(&mut pools, family);
++        drop(pools);
++        let Some(mut pool) = selected else {
++            crate::encoder_open_trace::mark(5);
+             return Ok(None);
+         };
++        crate::encoder_open_trace::mark(6);
+         // SAFETY: the pool is the caller's alone now, and nothing of it is pending: a command
+         // buffer that completed gave it back.
++        crate::encoder_open_trace::mark(7);
+         let reset = unsafe {
+             device
+                 .vk()
+                 .reset_command_pool(pool.raw, vk::CommandPoolResetFlags::empty())
+         };
++        crate::encoder_open_trace::mark(8);
+         if let Err(error) = reset {
++            crate::encoder_open_trace::mark(18);
+             // SAFETY: as above.
+             unsafe { release_in_section(device, pool.raw) };
+             return Err(vulkan(error));
