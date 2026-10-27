@@ -9,6 +9,9 @@
 #include <stdint.h>
 #include <string.h>
 #include "ScanoutCopyTrace.h"
+#include "ScanoutVerification.h"
+#include <memory>
+#include <dispatch/dispatch.h>
 
 namespace gpupresent {
 
@@ -36,6 +39,65 @@ public:
         target_ = [device newBufferWithBytesNoCopy:scanout.base length:scanout.bytes options:MTLResourceStorageModeShared deallocator:nil];
     }
     bool ready() const { return target_ != nil; }
+    // Diagnostic storage is allocated before WAIT_SWAP, never while a frame is leased.
+    // Two packed, private-to-this-client snapshots: source and actual scanout.
+    bool prepareVerification() {
+        const size_t row = (size_t)scanout_.width * 4;
+        verificationRows_ = scanout_.height < 400 ? scanout_.height : 400;
+        if (!ready() || !row || verificationRows_ > SIZE_MAX / row / 2) return false;
+        verificationBytes_ = row * verificationRows_;
+        verificationResult_ = std::make_shared<VerificationResult>();
+        verification_ = [device_ newBufferWithLength:verificationBytes_ * 2 options:MTLResourceStorageModeShared];
+        return verification_ && [verification_ contents];
+    }
+    // Capture while the swap lease still protects the source mapping and pixels.
+    // No CPU framebuffer loads. This queue has retired the display copy already.
+    bool verificationAvailable() const {
+        return verificationResult_ && !verificationResult_->busy.load(std::memory_order_acquire) &&
+            !verificationResult_->ready.load(std::memory_order_acquire);
+    }
+    bool captureVerification(const Frame &frame) {
+        if (!verification_ || !verificationBytes_ || verificationResult_->busy.load(std::memory_order_acquire) ||
+            verificationResult_->ready.load(std::memory_order_acquire)) return false;
+        const size_t row = (size_t)frame.width * 4;
+        if (frame.width != scanout_.width || frame.height != scanout_.height ||
+            frame.stride < row || !frame.stride || frame.bytes / frame.stride < verificationRows_) return false;
+        const NSUInteger alignment = [device_ minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
+        // Refuse unsupported geometry; never replace the diagnostic with a CPU copy.
+        if (!alignment || frame.stride % alignment || scanout_.stride % alignment || row % alignment) return false;
+        id<MTLBuffer> source = [device_ newBufferWithBytesNoCopy:(void *)frame.base length:frame.bytes options:MTLResourceStorageModeShared deallocator:nil];
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                     width:frame.width height:verificationRows_ mipmapped:NO];
+        d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> expected = [source newTextureWithDescriptor:d offset:0 bytesPerRow:frame.stride];
+        id<MTLTexture> shown = [target_ newTextureWithDescriptor:d offset:0 bytesPerRow:scanout_.stride];
+        if (!source || !expected || !shown) return false;
+        id<MTLCommandBuffer> commands = [queue_ commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+        if (!commands || !blit) return false;
+        [blit copyFromTexture:expected sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+                  sourceSize:MTLSizeMake(frame.width,verificationRows_,1) toBuffer:verification_ destinationOffset:0
+                  destinationBytesPerRow:row destinationBytesPerImage:verificationBytes_];
+        [blit copyFromTexture:shown sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+                  sourceSize:MTLSizeMake(frame.width,verificationRows_,1) toBuffer:verification_ destinationOffset:verificationBytes_
+                  destinationBytesPerRow:row destinationBytesPerImage:verificationBytes_];
+        [blit endEncoding]; [commands commit]; [commands waitUntilCompleted];
+        return commands.status == MTLCommandBufferStatusCompleted;
+    }
+    // No live mappings or Client/Presenter pointers escape to this worker. The
+    // block retains both storage and result even if the serving client exits.
+    void compareVerificationAsync() {
+        auto result = verificationResult_;
+        id<MTLBuffer> storage = verification_;
+        const uint32_t width = scanout_.width, rows = verificationRows_;
+        result->busy.store(true, std::memory_order_release);
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            result->publish(VerificationResult::compare((const uint32_t *)[storage contents], width, rows));
+        });
+    }
+    bool consumeVerification(uint64_t &mismatches) {
+        return verificationResult_ && verificationResult_->consume(mismatches);
+    }
     // One frame: encodes the GPU copy, commits, waits for the GPU. Rows are copied as whole rows of width*4 bytes.
     Result present(const Frame &frame, CopyTrace *trace = nullptr) {
         const bool tracing = trace && trace->begin(frame.width, frame.height, frame.stride, scanout_.stride);
@@ -103,6 +165,10 @@ private:
     Scanout scanout_;
     id<MTLCommandQueue> queue_;
     id<MTLBuffer> target_;
+    id<MTLBuffer> verification_ = nil;
+    std::shared_ptr<VerificationResult> verificationResult_;
+    size_t verificationBytes_ = 0;
+    uint32_t verificationRows_ = 0;
 };
 
 }  // namespace gpupresent

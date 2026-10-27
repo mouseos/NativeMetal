@@ -9,8 +9,7 @@ Built into the iPadOS plugin and the offline host instruments.
 ## First scanout copy timing (optional)
 
 `PVR_METAL_PIPELINE_DIAG=1` enables a fixed first-copy record in the Vulkan
-plugin. The default is off; no new thread, BO reads or copy-path logging are
-introduced. The existing status thread observes once per second until the first copy returns,
+plugin. The default is off. Timing records add no BO reads or copy-path logging. The existing status thread observes once per second until the first copy returns,
 then resumes 20-second sleeps. ST/PUB retain their 20-second cadence. Copy output
 is bounded to the first eight observations plus phase/return transitions (at most
 13 pairs), with no copy-path output. The two lines are:
@@ -41,10 +40,37 @@ copies; route 2 builds one multi-region copy, merging rows contiguous in both
 source and destination. Region/job counts must not be inferred from allocation
 size alone. No frame contents are read for these records.
 
-With `PVR_METAL_PIPELINE_DIAG=1`, the scanout client also uses its existing
-read-only verification of the first four successful copies. It compares
-32-bit pixels in the top 400 rows with the offered source, and reports the
-existing PF verified/mismatch counters. The lower diagnostic drawing area
-and row padding are not covered. This is pixel-readback evidence, not CPU
-rendering; the default profile leaves verification disabled. GPU copy timing
-excludes this comparison, but retirement latency includes its cost.
+With `PVR_METAL_PIPELINE_DIAG=1`, the client also enables optional pixel
+verification. Storage for two packed top-400-row snapshots is allocated before
+WAIT_SWAP. After a successful display copy, the GPU reads both the offered
+source and the actual scanout into that storage while the swap lease still
+protects the source mapping. Unsupported geometry, allocation or capture failure
+does not change the display-copy result and does not increment `PF v`.
+There are at most four capture attempts, including failed attempts.
+
+Only after COMPLETE_SWAP succeeds is CPU comparison dispatched to a background
+worker. The block retains the snapshot buffer and result record, never a live
+source/scanout mapping or Client/Presenter pointer. While comparison or result
+consumption is pending the slot cannot be overwritten; display serving continues
+without waiting for the worker. The serving thread consumes the atomic result
+on a subsequent serveOne call and updates the existing PF verified/mismatch-row
+counters. A client that exits before consumption may leave the result unreported.
+A completed capture after a failed COMPLETE_SWAP is never reported as verified.
+
+The comparison covers all 32-bit pixels in the top 400 rows of each captured
+frame, counting each differing row once. It excludes padding and the lower
+diagnostic drawing area. This is GPU-readback snapshot evidence, not the old
+CPU-direct framebuffer-load evidence, physical display scanout proof, or CPU
+rendering. Snapshot capture still adds GPU work before COMPLETE_SWAP; its wait
+has the ordinary Metal command-completion contract, with no fake success or
+timeout shortcut. CP/CT and lastMs exclude both capture and CPU comparison;
+PF/frame retirement and the actual image must be checked separately. The default
+profile allocates no verification storage and dispatches no comparison work.
+
+Host checks (also run with the macOS SDK compiler before deployment):
+`python3 tests/check_scanout_copy_trace.py` and
+`CXX=clang++ python3 tests/check_scanout_verification.py`.
+The latter executes production serveOne, comparison and publication code with
+completion that destroys the original mapping contents, capture/completion
+failures, the attempt cap and default-off operation. Metal API syntax is mocked;
+real GPU snapshot legality/coherency and deadline margin remain hardware checks.

@@ -107,6 +107,7 @@ __attribute__((objc_root_class)) @interface NSObject @end
 @end
 @protocol MTLTexture @end
 @protocol MTLBuffer
+- (void *)contents;
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)o bytesPerRow:(NSUInteger)b;
 @end
 @protocol MTLBlitCommandEncoder
@@ -125,20 +126,23 @@ __attribute__((objc_root_class)) @interface NSObject @end
 @end
 @protocol MTLDevice
 - (id<MTLCommandQueue>)newCommandQueue;
-- (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)p length:(NSUInteger)n options:(NSUInteger)o deallocator:(void *)d;
+- (id<MTLBuffer>)newBufferWithLength:(NSUInteger)n options:(NSUInteger)o;
+- (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)p length:(NSUInteger)n options:(NSUInteger)o deallocator:(void (^)(void *, NSUInteger))d;
 - (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(NSUInteger)f;
 @end
 '''
 with tempfile.TemporaryDirectory() as directory:
     tmp=Path(directory); (tmp/'Metal').mkdir(); (tmp/'Metal/Metal.h').write_text(metal)
-    (tmp/'presenter.mm').write_text('#include "GpuScanoutPresenter.h"\nvoid check(gpupresent::Presenter &p, const gpupresent::Frame &f, gpupresent::CopyTrace &t) { p.present(f); p.present(f,&t); }\n')
+    (tmp/'dispatch').mkdir(); (tmp/'dispatch/dispatch.h').write_text('typedef void *dispatch_queue_t; enum { DISPATCH_QUEUE_PRIORITY_DEFAULT=0 }; dispatch_queue_t dispatch_get_global_queue(long,unsigned long); void dispatch_async(dispatch_queue_t,void (^)(void));\n')
+    (tmp/'mach').mkdir(); (tmp/'mach/mach_time.h').write_text('#include <stdint.h>\nstruct mach_timebase_info_data_t { unsigned numer,denom; }; uint64_t mach_absolute_time(); int mach_timebase_info(mach_timebase_info_data_t *);\n')
+    (tmp/'presenter.mm').write_text('#include "GpuScanoutClient.h"\n#include "GpuScanoutPresenter.h"\nvoid check(gpupresent::Presenter &p, const gpupresent::Frame &f, gpupresent::CopyTrace &t) { p.present(f); p.present(f,&t); }\n')
     includes=[]
     if sys.platform.startswith('linux'):
         search=subprocess.run([os.environ.get('CXX','c++'), '-E', '-v', '-x', 'c++', '-'], input='', text=True, capture_output=True, check=True).stderr
         for line in search.split('#include <...> search starts here:')[1].split('End of search list.')[0].splitlines():
             if line.strip(): includes += ['-isystem', line.strip()]
     subprocess.run([os.environ.get('CLANGXX','clang++'), *includes, '-std=c++17', '-x', 'objective-c++',
-                    '-fsyntax-only', '-Wall', '-Wextra', '-Werror', '-I', str(tmp), '-I', str(root),
+                    '-fsyntax-only', '-fblocks', '-fobjc-arc', *(['-fobjc-runtime=gnustep-2.0'] if sys.platform.startswith('linux') else []), '-Wall', '-Wextra', '-Werror', '-I', str(tmp), '-I', str(root),
                     str(tmp/'presenter.mm')], check=True)
 
 # Verify the production hooks delimit the actual operations, including all encoding branches.
@@ -147,7 +151,7 @@ ordered=['trace->begin(frame.width, frame.height, frame.stride, scanout_.stride)
          '[queue_ commandBuffer]', 'trace->encoded(1)', '[commands blitCommandEncoder]', 'trace->encoded(2)',
          'trace->encoded(4)', '[blit endEncoding];\n        if (tracing)', 'trace->encoded(5)', 'trace->reached(3)',
          '[commands commit]', 'trace->reached(4)', '[commands waitUntilCompleted]', 'trace->reached(5)']
-positions=[presenter.index(x) for x in ordered]
+positions=[presenter.index(x, presenter.index("Result present(")) for x in ordered]
 assert positions == sorted(positions)
 client=(root/'GpuScanoutClient.h').read_text()
 assert 'swap.width, swap.height}, copyTrace_)' in client

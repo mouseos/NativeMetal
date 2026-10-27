@@ -29,7 +29,7 @@ struct Stats {
     int lastResult;     // gpupresent::Result of the last frame
     int step;           // 0 idle, 2 mode refused, 3 scanout not mappable/importable, 4 serving
     int error;          // the failing call's return, when there is one
-    uint64_t verified;  // frames whose scanout was read back and compared with the surface
+    uint64_t verified;  // frames whose GPU snapshots of scanout and source were compared after completion
     uint64_t mismatchRows;   // rows of those frames that differ (CPU reads only: nothing is rendered or copied by the CPU)
     uint32_t lastMs;    // the GPU copy's time for the last frame
     uint64_t totalMs;   // and for all frames (the mean is totalMs / (frames + failures))
@@ -65,12 +65,18 @@ public:
         presenter_ = new gpupresent::Presenter(device, scanout);
         note(0x6715);
         if (!presenter_->ready()) return fail(3, 0);
+        if (stats_->verifyFrames) verificationReady_ = presenter_->prepareVerification();
         stats_->step = 4;
         return true;
     }
     // One wait (at most timeoutMs) and, when the display driver offered a frame, one GPU copy and its completion. Returns false on a
     // protocol error that makes further serving pointless.
     bool serveOne(uint64_t timeoutMs) {
+        uint64_t mismatches = 0;
+        if (presenter_->consumeVerification(mismatches)) {
+            stats_->mismatchRows += mismatches;
+            ++stats_->verified;
+        }
         NGPWait wait = {timeoutMs};
         NGPSwap swap = {};
         if (!stats_->timeouts && !stats_->frames) note(0x6720);   // first wait
@@ -93,29 +99,22 @@ public:
             stats_->totalMs += stats_->lastMs;
         }
         stats_->lastResult = (int)r;
-        if (r == gpupresent::kOk && stats_->verifyFrames && stats_->verified < 4) verify(swap);
+        const bool capture = r == gpupresent::kOk && verificationReady_ && verificationAttempts_ < 4 && presenter_->verificationAvailable();
+        if (capture) ++verificationAttempts_;
+        const bool captured = capture && presenter_->captureVerification({(const void *)(uintptr_t)swap.address,
+                (size_t)((swap.bytes + page - 1) & ~(page - 1)), (size_t)swap.stride, swap.width, swap.height});
         note(0x6731);   // the GPU copy returned
         NGPComplete done = {swap.sequence, r == gpupresent::kOk ? 0u : 0xe00002bcu /* kIOReturnError */, 0};
         const int completed = transport_.call(transport_.context, NGP_METHOD_COMPLETE_SWAP, &done, sizeof done, nullptr, 0);
         if (completed) {++stats_->failures; stats_->error = completed; return false;}
         if (r == gpupresent::kOk) ++stats_->frames; else ++stats_->failures;
+        if (captured) presenter_->compareVerificationAsync();
         return true;
     }
 private:
     gpupresent::CopyTrace *copyTrace_ = nullptr;
-    // Reads the scanout back with aligned 32-bit loads (the framebuffer is device memory; wider loads can fault) and compares the top rows with the
-    // surface the GPU copied. The lower part of the panel is skipped: the diagnostic renderer paints there. Evidence only; nothing is written.
-    void verify(const NGPSwap &swap) {
-        const uint32_t rows = swap.height < 400 ? swap.height : 400, words = swap.width;
-        const volatile uint32_t *shown = (const volatile uint32_t *)scanout_.base;
-        const volatile uint32_t *surface = (const volatile uint32_t *)(uintptr_t)swap.address;
-        for (uint32_t y = 0; y < rows; ++y) {
-            const volatile uint32_t *a = shown + (size_t)y * (scanout_.stride / 4), *b = surface + (size_t)y * (swap.stride / 4);
-            for (uint32_t x = 0; x < words; ++x)
-                if (a[x] != b[x]) {++stats_->mismatchRows; break;}
-        }
-        ++stats_->verified;
-    }
+    bool verificationReady_ = false;
+    unsigned verificationAttempts_ = 0;
     void note(uint32_t value) {if (transport_.mark) transport_.mark(transport_.context, value);}
     bool fail(int step, int error) {stats_->step = step; stats_->error = error; return false;}
     Transport transport_ = {};
