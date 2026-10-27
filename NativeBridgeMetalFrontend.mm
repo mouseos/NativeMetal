@@ -1038,7 +1038,10 @@ static void scheduled(void *context);
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
   void *context=(__bridge_retained void *)self;
   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
-     nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle)) {
+     (encodedWork.passes ? (uiLatency(15,self.commitIndex,encodedWork.draws),true) : true) &&
+     nmb_command_buffer_on_scheduled(_handle,scheduled,context) &&
+     (encodedWork.passes ? (uiLatency(16,self.commitIndex,encodedWork.draws),true) : true) &&
+     nmb_command_buffer_commit(_handle)) {
    uiLatency(encodedWork.passes?12:22,self.commitIndex,encodedWork.draws);return;
   }
   (void)CFBridgingRelease(context);   // refused registration/commit cannot call the registered handlers

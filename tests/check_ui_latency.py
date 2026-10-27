@@ -46,4 +46,38 @@ after=commit.index('if(encodedWork.passes)uiLatency(14')
 submit=commit.index('nmb_command_buffer_commit(_handle)')
 end=commit.index('uiLatency(encodedWork.passes?12:22')
 assert enter < before < flush < after < submit < end
+start=commit.index('if(nmb_command_buffer_on_completed(')
+finish=commit.index(') {\n   uiLatency(encodedWork.passes?12:22',start)
+condition=commit[start+3:finish].replace('self.commitIndex','index')
+exercise=r'''
+#include "UiLatencyTrace.h"
+#include <atomic>
+#include <cassert>
+static unsigned clocks;
+static uint64_t mach_absolute_time(){return ++clocks;}
+HOOKS
+struct Work {unsigned passes,draws;} encodedWork;
+static uint64_t index; static int _handle,context,completed,scheduled;
+static int calls, failAt; static bool earlyCallback;
+static bool call(int which){++calls;assert(calls==which);return which!=failAt;}
+static bool nmb_command_buffer_on_completed(int,int,int){return call(1);}
+static bool nmb_command_buffer_on_scheduled(int,int,int){return call(2);}
+static bool nmb_command_buffer_commit(int){bool result=call(3);if(result && earlyCallback && encodedWork.passes)uiLatency(11,index,encodedWork.draws);return result;}
+static bool run(){return CONDITION;}
+int main(){
+ for(int fail=0;fail<=3;++fail)for(int render=0;render<2;++render)for(int enabled=0;enabled<2;++enabled){
+  calls=0;failAt=fail;clocks=0;encodedWork={unsigned(render),3};index=7;earlyCallback=true;
+  native_bridge_metal_enable_latency(enabled);bool ok=run();assert(ok==(fail==0));assert(calls==(fail?fail:3));
+  uint64_t out[4];unsigned kinds[3]={15,16,11};unsigned n=0;
+  while(native_bridge_metal_latency_event(out)){assert(enabled&&render&&out[1]==7&&out[2]==kinds[n++]);}
+  unsigned expected=enabled&&render?(fail==1?0:fail==2?1:fail==3?2:3):0;
+  assert(n==expected);assert(clocks==expected);
+ }
+}
+'''.replace('HOOKS',hooks).replace('CONDITION',condition)
+with tempfile.TemporaryDirectory() as d:
+ p=Path(d);(p/'condition.cpp').write_text(exercise)
+ subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-pthread','-Wall','-Wextra','-Werror','-I',str(r),str(p/'condition.cpp'),'-o',str(p/'condition')],check=True)
+ subprocess.run([str(p/'condition')],check=True)
+print('PASS actual commit condition: off/non-render, registration failures, commit refusal and early callback')
 print('PASS actual frontend hooks default-off/raw timestamps and bounded MPSC queue/drop accounting')

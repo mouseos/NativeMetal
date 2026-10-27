@@ -91,6 +91,9 @@ For render commands, 13 and 14 bracket the pre-commit surface cache flush;
 10–13 includes frontend setup, 13–14 includes the flush and scheduling, and
 14–12 includes callback registration and the runtime commit. A missing 12
 can mean submission was refused or an event was dropped; it is not a duration.
+Events 15 and 16 mark successful registration of the completed and scheduled
+handlers. Thus 14–15 and 15–16 include each registration; 16–12 includes the
+runtime commit. A refused registration has no later registration marker.
 Callback may precede submit return; sort by captured tick, never UART line order.
 41 is successful WAIT_SWAP return; 42/43 bracket COMPLETE_SWAP with swap IDs.
 42/43 and the kernel's matching receive event allow a bounded clock-offset
