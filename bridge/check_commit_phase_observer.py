@@ -41,8 +41,15 @@ fn main(){
  }));assert!(caught.is_err());
  {let l=LOG.lock().unwrap();assert_eq!(l.as_slice(),&[(51,10,2),(50,9,1),(52,9,3)]);}
  LOG.lock().unwrap().clear();
- holder::unixnu_commit_trace::capture(11,clock,sink,||for k in 0..10{holder::mark(k)});
- {let l=LOG.lock().unwrap();assert_eq!(l.len(),9);assert_eq!(l[8].0,59);assert_eq!(l[8].1,11);}
+ holder::unixnu_commit_trace::capture(11,clock,sink,||for k in 0..18{holder::mark(k)});
+ {let l=LOG.lock().unwrap();assert_eq!(l.len(),17);assert_eq!(l[16].0,59);assert_eq!(l[16].1,11);}
+ LOG.lock().unwrap().clear();
+ holder::unixnu_commit_trace::capture(77,clock,sink,||{
+  for k in 50..=55 { holder::mark(k); }
+  for _ in 0..2 { for k in [60,61,62,64,65,63] { holder::mark(k); } }
+  for k in [57,58,56] { holder::mark(k); }
+ });
+ {let l=LOG.lock().unwrap();let kinds:Vec<_>=l.iter().map(|r|r.0).collect();assert_eq!(kinds.len(),17);assert_eq!(&kinds[13..],&[57,58,56,59]);}
  LOG.lock().unwrap().clear();
  let jobs:Vec<_>=(0..4).map(|id|std::thread::spawn(move||holder::unixnu_commit_trace::capture(id,clock,sink,||holder::mark(50)))).collect();
  for j in jobs{j.join().unwrap();}

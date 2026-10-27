@@ -13,7 +13,7 @@ index 364edb4f..8073b00a 100644
  # validation/fixtures/public/examples/runtime_examples.metal on the system default device, from the
  # workspace checkout (its committed LLVM text, assembled by `llvm-as`), or a metallib passed as the
 diff --git a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
-index 8b3a0c25..cbdc0f62 100644
+index 8b3a0c25..81c98a81 100644
 --- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
 +++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
 @@ -1536,9 +1536,13 @@ impl CommandBuffer {
@@ -69,7 +69,7 @@ index 8b3a0c25..cbdc0f62 100644
          if let Some(image) = away {
              device.degrade(Degradation::WrappedImageLayoutTransitions, || {
                  image.notice()
-@@ -2900,3 +2914,72 @@ fn submission_error(device: &Device, error: vk::Result) -> CommandBufferError {
+@@ -2900,3 +2914,87 @@ fn submission_error(device: &Device, error: vk::Result) -> CommandBufferError {
          _ => CommandBufferError::Internal(super::error::VkResultCode(error.as_raw())),
      }
  }
@@ -88,7 +88,7 @@ index 8b3a0c25..cbdc0f62 100644
 +        id: u64,
 +        clock: Clock,
 +        sink: Sink,
-+        rows: [(u32, u64); 8],
++        rows: [(u32, u64); 16],
 +        len: usize,
 +        overflow: bool,
 +    }
@@ -99,9 +99,16 @@ index 8b3a0c25..cbdc0f62 100644
 +    struct Scope(Option<State>, std::marker::PhantomData<std::rc::Rc<()>>);
 +    impl Scope {
 +        fn begin(id: u64, clock: Clock, sink: Sink) -> Self {
-+            let previous = ACTIVE.with(|slot| slot.replace(Some(State {
-+                id, clock, sink, rows: [(0, 0); 8], len: 0, overflow: false,
-+            })));
++            let previous = ACTIVE.with(|slot| {
++                slot.replace(Some(State {
++                    id,
++                    clock,
++                    sink,
++                    rows: [(0, 0); 16],
++                    len: 0,
++                    overflow: false,
++                }))
++            });
 +            Self(previous, std::marker::PhantomData)
 +        }
 +    }
@@ -115,7 +122,9 @@ index 8b3a0c25..cbdc0f62 100644
 +                for &(kind, tick) in &state.rows[..state.len] {
 +                    (state.sink)(kind, state.id, tick);
 +                }
-+                if state.overflow { (state.sink)(59, state.id, (state.clock)()); }
++                if state.overflow {
++                    (state.sink)(59, state.id, (state.clock)());
++                }
 +            }
 +            DRAINING.with(|flag| flag.set(false));
 +            ACTIVE.with(|slot| slot.set(self.0));
@@ -124,14 +133,20 @@ index 8b3a0c25..cbdc0f62 100644
 +    /// Capture one synchronous call. The clock and sink must satisfy their contracts;
 +    /// nested calls are isolated and the scope is restored on unwind.
 +    pub fn capture<T>(id: u64, clock: Clock, sink: Sink, call: impl FnOnce() -> T) -> T {
-+        if DRAINING.with(|flag| flag.get()) { return call(); }
++        if DRAINING.with(|flag| flag.get()) {
++            return call();
++        }
 +        let _scope = Scope::begin(id, clock, sink);
 +        call()
 +    }
-+    pub(super) fn record(kind: u32) {
++    pub(crate) fn record(kind: u32) {
 +        ACTIVE.with(|slot| {
 +            if let Some(mut state) = slot.get() {
-+                if state.len < state.rows.len() {
++                // Detailed batch events may repeat. Reserve the last three
++                // entries for scheduler exit (57/58) and commit exit (56).
++                // Overflow is reported even when a detail event is omitted.
++                let detail = (60..=65).contains(&kind);
++                if state.len < state.rows.len() && (!detail || state.len < state.rows.len() - 3) {
 +                    state.rows[state.len] = (kind, (state.clock)());
 +                    state.len += 1;
 +                } else {
@@ -142,6 +157,52 @@ index 8b3a0c25..cbdc0f62 100644
 +        });
 +    }
 +}
+diff --git a/crates/metal2vulkan-runtime/src/command_buffer/submit.rs b/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
+index d90691f0..99747b21 100644
+--- a/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
+@@ -136,6 +136,11 @@ impl CommandBufferShared {
+         event_waits: &[(vk::Semaphore, u64)],
+         scheduler: &mut scheduler::State,
+     ) -> Result<Option<Submission>, CommandBufferError> {
++        // Detail events describe work in the active caller's capture, which
++        // can include batches from other command buffers. Repeated kinds are
++        // not attributable to the capture's command ID.
++        #[cfg(feature = "unixnu-commit-trace")]
++        super::unixnu_commit_trace::record(60);
+         let device = &self.device;
+         if device.is_lost() {
+             return Err(CommandBufferError::DeviceLost);
+@@ -160,6 +165,8 @@ impl CommandBufferShared {
+                 return Ok(None);
+             }
+         }
++        #[cfg(feature = "unixnu-commit-trace")]
++        super::unixnu_commit_trace::record(61);
+         // Each of Metal's submissions it found rebound, or holding a detached buffer, fails as
+         // its own batch is submitted, after the batch's checks: one a check failed keeps the
+         // check's code.
+@@ -548,10 +555,19 @@ impl CommandBufferShared {
+         // transition is of a live image of the caller's in the layout it is in (its contract,
+         // `new_texture_with_vk_image`); the fence is unsignaled and in no pending submission;
+         // the `VkQueue` is used under its lock.
++        #[cfg(feature = "unixnu-commit-trace")]
++        super::unixnu_commit_trace::record(62);
+         let submitted = shared.submit_logged(queue, fence, &self.relayed, |vk_queue| unsafe {
+             shared.counts.queue_submitted(buffers);
+-            raw.queue_submit(vk_queue, &submits, fence.unwrap_or(vk::Fence::null()))
++            #[cfg(feature = "unixnu-commit-trace")]
++            super::unixnu_commit_trace::record(64);
++            let result = raw.queue_submit(vk_queue, &submits, fence.unwrap_or(vk::Fence::null()));
++            #[cfg(feature = "unixnu-commit-trace")]
++            super::unixnu_commit_trace::record(65);
++            result
+         });
++        #[cfg(feature = "unixnu-commit-trace")]
++        super::unixnu_commit_trace::record(63);
+         exit_guard::called(Call::QueueSubmit);
+         if let Err(error) = submitted {
+             if let Some(fence) = fence {
 diff --git a/crates/metal2vulkan-runtime/src/lib.rs b/crates/metal2vulkan-runtime/src/lib.rs
 index 4781491b..7c1194d8 100644
 --- a/crates/metal2vulkan-runtime/src/lib.rs
@@ -156,3 +217,25 @@ index 4781491b..7c1194d8 100644
  mod compressed_blit;
  mod compute;
  mod contexts;
+diff --git a/crates/metal2vulkan-runtime/src/scheduler/mod.rs b/crates/metal2vulkan-runtime/src/scheduler/mod.rs
+index 2aa0798a..60a95867 100644
+--- a/crates/metal2vulkan-runtime/src/scheduler/mod.rs
++++ b/crates/metal2vulkan-runtime/src/scheduler/mod.rs
+@@ -252,6 +252,8 @@ impl Scheduler {
+         let outcome = (shared.inbox).commit(committed, |state, commits| {
+             pass(state, commits, (&mut passed, &mut left), shared, false);
+         });
++        #[cfg(feature = "unixnu-commit-trace")]
++        crate::command_buffer::unixnu_commit_trace::record(57);
+         if outcome.left {
+             buffer.device().shared().counts.commit_handed_off();
+         }
+@@ -268,6 +270,8 @@ impl Scheduler {
+         settle(settled);
+         // On the committing thread, before `commit` returns.
+         run_submission_handlers(handlers);
++        #[cfg(feature = "unixnu-commit-trace")]
++        crate::command_buffer::unixnu_commit_trace::record(58);
+         // Without the lock, as the thread lets go of them: the thread finds the steps and the
+         // checks again in its own pass, which the pass that found them woke it for.
+         drop(spent);
