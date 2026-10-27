@@ -185,6 +185,10 @@ bool nmb_command_buffer_on_completed(NmbCommandBuffer *, void (*handler)(void *c
  * The caller keeps context alive until completion (or a refused commit). */
 bool nmb_command_buffer_on_scheduled(NmbCommandBuffer *, void (*handler)(void *context), void *context);
 bool nmb_command_buffer_commit(NmbCommandBuffer *);
+#if defined(NMB_RUNTIME_COMMIT_TRACE)
+bool nmb_command_buffer_commit_profiled(NmbCommandBuffer *, uint64_t,
+    uint64_t (*clock)(void), void (*sink)(uint32_t, uint64_t, uint64_t));
+#endif
 /* Wait for scheduling and scheduled handlers only; false on a refused wait. */
 bool nmb_command_buffer_wait_scheduled(NmbCommandBuffer *);
 /* 0 completed in time, 1 timed out (timeout_ms 0 waits without a bound). */

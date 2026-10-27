@@ -115,6 +115,11 @@ static void uiLatency(unsigned kind,uint64_t id,unsigned work,uint64_t tick=0) {
  if(gUiLatencyEnabled.load(std::memory_order_relaxed))
   gUiLatency.push({tick?tick:mach_absolute_time(),id,kind,work});
 }
+#if defined(NMB_RUNTIME_COMMIT_TRACE)
+// Both callbacks are nonblocking, non-reentrant, and cannot call the runtime.
+static uint64_t runtimeTraceClock() {return mach_absolute_time();}
+static void runtimeTraceSink(uint32_t kind,uint64_t id,uint64_t tick) {uiLatency(kind,id,0,tick);}
+#endif
 extern "C" void native_bridge_metal_latency_record(uint32_t kind,uint64_t id,uint64_t tick) {uiLatency(kind,id,0,tick);}
 extern "C" void native_bridge_metal_enable_latency(bool enabled) {gUiLatencyEnabled.store(enabled);}
 extern "C" bool native_bridge_metal_latency_event(uint64_t out[4]) {
@@ -1041,7 +1046,13 @@ static void scheduled(void *context);
      (encodedWork.passes ? (uiLatency(15,self.commitIndex,encodedWork.draws),true) : true) &&
      nmb_command_buffer_on_scheduled(_handle,scheduled,context) &&
      (encodedWork.passes ? (uiLatency(16,self.commitIndex,encodedWork.draws),true) : true) &&
+#if defined(NMB_RUNTIME_COMMIT_TRACE)
+     (encodedWork.passes && gUiLatencyEnabled.load(std::memory_order_relaxed)
+        ? nmb_command_buffer_commit_profiled(_handle,self.commitIndex,runtimeTraceClock,runtimeTraceSink)
+        : nmb_command_buffer_commit(_handle))) {
+#else
      nmb_command_buffer_commit(_handle)) {
+#endif
    uiLatency(encodedWork.passes?12:22,self.commitIndex,encodedWork.draws);return;
   }
   (void)CFBridgingRelease(context);   // refused registration/commit cannot call the registered handlers

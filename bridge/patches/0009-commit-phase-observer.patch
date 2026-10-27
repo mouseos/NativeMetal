@@ -1,0 +1,158 @@
+diff --git a/crates/metal2vulkan-runtime/Cargo.toml b/crates/metal2vulkan-runtime/Cargo.toml
+index 364edb4f..8073b00a 100644
+--- a/crates/metal2vulkan-runtime/Cargo.toml
++++ b/crates/metal2vulkan-runtime/Cargo.toml
+@@ -23,6 +23,9 @@ exclude = ["/target/", "**/*.air", "**/*.metallib", "**/*.spv"]
+ name = "metal2vulkan_runtime"
+ path = "src/lib.rs"
+ 
++[features]
++unixnu-commit-trace = []
++
+ # Runnable examples for consumers (README.md, "Examples"): each runs the owned fixture
+ # validation/fixtures/public/examples/runtime_examples.metal on the system default device, from the
+ # workspace checkout (its committed LLVM text, assembled by `llvm-as`), or a metallib passed as the
+diff --git a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+index 8b3a0c25..cbdc0f62 100644
+--- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+@@ -1536,9 +1536,13 @@ impl CommandBuffer {
+ 
+     /// [`commit_as`](Self::commit_as) itself.
+     fn commit_now(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
++        #[cfg(feature = "unixnu-commit-trace")]
++        unixnu_commit_trace::record(50);
+         let device = &self.0.device;
+         let (segments, failure, reached): (Vec<(Deferred, bool)>, _, _) = {
+             let mut state = self.state();
++            #[cfg(feature = "unixnu-commit-trace")]
++            unixnu_commit_trace::record(51);
+             if let Some(problem) = state.refusal() {
+                 return Err(invalid(call, problem));
+             }
+@@ -1576,6 +1580,8 @@ impl CommandBuffer {
+         // Metal's is: a no-copy buffer or a heap among it is reached unnamed from here, by its
+         // own commands too, the work recorded below included (`live_buffers.rs`). Listed without
+         // the lock: what it upgrades may be a resource's last hold.
++        #[cfg(feature = "unixnu-commit-trace")]
++        unixnu_commit_trace::record(52);
+         let used = reached.list();
+         device.shared().live_buffers.reach(&used);
+         // Listed again at its first submission where the list changed since (a rebind ends a
+@@ -1583,10 +1589,14 @@ impl CommandBuffer {
+         let listing = Listing::new(device, used);
+         // Recorded, or settled for their host steps, with the lock free: their dispatches take it,
+         // and announce degradations.
++        #[cfg(feature = "unixnu-commit-trace")]
++        unixnu_commit_trace::record(53);
+         let prepared: Result<Vec<_>, Error> = segments
+             .iter()
+             .map(|(work, host)| work.prepare(self, *host))
+             .collect();
++        #[cfg(feature = "unixnu-commit-trace")]
++        unixnu_commit_trace::record(54);
+         let prepared = match prepared {
+             Ok(prepared) => prepared,
+             Err(error) => {
+@@ -1742,10 +1752,14 @@ impl CommandBuffer {
+         // the scheduler can run one.
+         let _ = self.0.step_numbers.set(StepNumbers::reserve());
+         // The scheduler's lock is taken before a command buffer's, never under it.
++        #[cfg(feature = "unixnu-commit-trace")]
++        unixnu_commit_trace::record(55);
+         device
+             .shared()
+             .scheduler
+             .commit(&self.0, self.0.queue.id(), waits);
++        #[cfg(feature = "unixnu-commit-trace")]
++        unixnu_commit_trace::record(56);
+         if let Some(image) = away {
+             device.degrade(Degradation::WrappedImageLayoutTransitions, || {
+                 image.notice()
+@@ -2900,3 +2914,72 @@ fn submission_error(device: &Device, error: vk::Result) -> CommandBufferError {
+         _ => CommandBufferError::Internal(super::error::VkResultCode(error.as_raw())),
+     }
+ }
++
++/// Optional bounded observer of synchronous commit phases.
++#[cfg(feature = "unixnu-commit-trace")]
++pub mod unixnu_commit_trace {
++    use std::cell::Cell;
++
++    /// Monotonic clock. It must not block, lock, panic, reenter, or call the runtime.
++    pub type Clock = extern "C" fn() -> u64;
++    /// Nonblocking, non-panicking recipient; it must not call the bridge or runtime.
++    pub type Sink = extern "C" fn(u32, u64, u64);
++    #[derive(Clone, Copy)]
++    struct State {
++        id: u64,
++        clock: Clock,
++        sink: Sink,
++        rows: [(u32, u64); 8],
++        len: usize,
++        overflow: bool,
++    }
++    thread_local! { static ACTIVE: Cell<Option<State>> = const { Cell::new(None) }; }
++    thread_local! { static DRAINING: Cell<bool> = const { Cell::new(false) }; }
++
++    /// Restores the prior scope and drains the bounded records on scope exit.
++    struct Scope(Option<State>, std::marker::PhantomData<std::rc::Rc<()>>);
++    impl Scope {
++        fn begin(id: u64, clock: Clock, sink: Sink) -> Self {
++            let previous = ACTIVE.with(|slot| slot.replace(Some(State {
++                id, clock, sink, rows: [(0, 0); 8], len: 0, overflow: false,
++            })));
++            Self(previous, std::marker::PhantomData)
++        }
++    }
++    impl Drop for Scope {
++        fn drop(&mut self) {
++            // The concrete sink is non-reentrant; suppress the enclosing scope
++            // during draining so sink activity is not attributed to it.
++            let current = ACTIVE.with(|slot| slot.replace(None));
++            DRAINING.with(|flag| flag.set(true));
++            if let Some(state) = current {
++                for &(kind, tick) in &state.rows[..state.len] {
++                    (state.sink)(kind, state.id, tick);
++                }
++                if state.overflow { (state.sink)(59, state.id, (state.clock)()); }
++            }
++            DRAINING.with(|flag| flag.set(false));
++            ACTIVE.with(|slot| slot.set(self.0));
++        }
++    }
++    /// Capture one synchronous call. The clock and sink must satisfy their contracts;
++    /// nested calls are isolated and the scope is restored on unwind.
++    pub fn capture<T>(id: u64, clock: Clock, sink: Sink, call: impl FnOnce() -> T) -> T {
++        if DRAINING.with(|flag| flag.get()) { return call(); }
++        let _scope = Scope::begin(id, clock, sink);
++        call()
++    }
++    pub(super) fn record(kind: u32) {
++        ACTIVE.with(|slot| {
++            if let Some(mut state) = slot.get() {
++                if state.len < state.rows.len() {
++                    state.rows[state.len] = (kind, (state.clock)());
++                    state.len += 1;
++                } else {
++                    state.overflow = true;
++                }
++                slot.set(Some(state));
++            }
++        });
++    }
++}
+diff --git a/crates/metal2vulkan-runtime/src/lib.rs b/crates/metal2vulkan-runtime/src/lib.rs
+index 4781491b..7c1194d8 100644
+--- a/crates/metal2vulkan-runtime/src/lib.rs
++++ b/crates/metal2vulkan-runtime/src/lib.rs
+@@ -51,6 +51,9 @@ mod clear_value;
+ mod color_reformat;
+ mod color_resolve;
+ mod command_buffer;
++#[cfg(feature = "unixnu-commit-trace")]
++#[doc(hidden)]
++pub use command_buffer::unixnu_commit_trace;
+ mod compressed_blit;
+ mod compute;
+ mod contexts;

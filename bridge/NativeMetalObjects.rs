@@ -1488,6 +1488,21 @@ pub extern "C" fn nmb_command_buffer_commit(command_buffer: *mut NmbCommandBuffe
     })
 }
 
+#[cfg(feature = "unixnu-commit-trace")]
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_command_buffer_commit_profiled(command_buffer: *mut NmbCommandBuffer, id: u64,
+    clock: Option<metal2vulkan_runtime::unixnu_commit_trace::Clock>,
+    sink: Option<metal2vulkan_runtime::unixnu_commit_trace::Sink>) -> bool {
+    guard(false, || {
+        let clock = clock.ok_or("null commit trace clock")?;
+        let sink = sink.ok_or("null commit trace sink")?;
+        metal2vulkan_runtime::unixnu_commit_trace::capture(id, clock, sink, || {
+            get(command_buffer)?.0.commit().map_err(e("commit"))?;
+            Ok(true)
+        })
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_command_buffer_wait(command_buffer: *mut NmbCommandBuffer, timeout_ms: u64) -> i32 {
     guard(-1, || {
