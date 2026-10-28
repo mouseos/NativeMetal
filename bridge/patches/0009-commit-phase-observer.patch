@@ -3,8 +3,8 @@ diff --git a/crates/metal2vulkan-runtime/Cargo.toml b/crates/metal2vulkan-runtim
 +++ b/crates/metal2vulkan-runtime/Cargo.toml
 @@ -22,2 +22,3 @@
  [features]
- shader-capture = []
 +unixnu-commit-trace = []
+ shader-capture = []
 diff --git a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
 index 8b3a0c25..81c98a81 100644
 --- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
