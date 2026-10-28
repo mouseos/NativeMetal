@@ -1,17 +1,10 @@
 diff --git a/crates/metal2vulkan-runtime/Cargo.toml b/crates/metal2vulkan-runtime/Cargo.toml
-index 364edb4f..8073b00a 100644
 --- a/crates/metal2vulkan-runtime/Cargo.toml
 +++ b/crates/metal2vulkan-runtime/Cargo.toml
-@@ -23,6 +23,9 @@ exclude = ["/target/", "**/*.air", "**/*.metallib", "**/*.spv"]
- name = "metal2vulkan_runtime"
- path = "src/lib.rs"
- 
-+[features]
+@@ -22,2 +22,3 @@
+ [features]
+ shader-capture = []
 +unixnu-commit-trace = []
-+
- # Runnable examples for consumers (README.md, "Examples"): each runs the owned fixture
- # validation/fixtures/public/examples/runtime_examples.metal on the system default device, from the
- # workspace checkout (its committed LLVM text, assembled by `llvm-as`), or a metallib passed as the
 diff --git a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
 index 8b3a0c25..81c98a81 100644
 --- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
