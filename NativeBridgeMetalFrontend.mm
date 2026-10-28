@@ -1047,7 +1047,7 @@ static void scheduled(void *context);
      nmb_command_buffer_on_scheduled(_handle,scheduled,context) &&
      (encodedWork.passes ? (uiLatency(16,self.commitIndex,encodedWork.draws),true) : true) &&
 #if defined(NMB_RUNTIME_COMMIT_TRACE)
-     (encodedWork.passes && gUiLatencyEnabled.load(std::memory_order_relaxed)
+     (gUiLatencyEnabled.load(std::memory_order_relaxed)
         ? nmb_command_buffer_commit_profiled(_handle,self.commitIndex,runtimeTraceClock,runtimeTraceSink)
         : nmb_command_buffer_commit(_handle))) {
 #else

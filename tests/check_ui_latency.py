@@ -40,6 +40,8 @@ with tempfile.TemporaryDirectory() as d:
 assert 'PVR_METAL_LATENCY_DIAG' in (r/'NativeVulkanMetalPlugin.mm').read_text()
 commit=s[s.index('- (void)commit {'):s.index('- (void)waitUntilCompleted {')]
 assert 'nmb_command_buffer_commit_profiled(_handle,self.commitIndex,runtimeTraceClock,runtimeTraceSink)' in commit
+assert '(gUiLatencyEnabled.load(std::memory_order_relaxed)\n        ? nmb_command_buffer_commit_profiled' in commit
+assert 'encodedWork.passes && gUiLatencyEnabled' not in commit
 commit=re.sub(r'#if defined\(NMB_RUNTIME_COMMIT_TRACE\)\n.*?#else\n(.*?)#endif\n',r'\1',commit,flags=re.S)
 enter=commit.index('uiLatency(encodedWork.passes?10:20')
 before=commit.index('if(encodedWork.passes)uiLatency(13')
