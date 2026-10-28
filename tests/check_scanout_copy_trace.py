@@ -185,7 +185,7 @@ mock = r"""
 static gpupresent::CopyTrace gCopyTrace;
 static bool gCopyTraceEnabled=true;
 static bool gUiLatencyEnabled=false;
-static bool native_bridge_metal_latency_event(uint64_t *){return false;}
+static bool native_bridge_metal_latency_event_with_tid(uint64_t *){return false;}
 static uint64_t native_bridge_metal_latency_lost(){return 0;}
 static unsigned getpid(){return 1;}
 struct mach_timebase_info_data_t {unsigned numer,denom;};

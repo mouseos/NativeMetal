@@ -111,20 +111,31 @@ struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t schedul
 static CommitRecord gCommitRing[32];
 static std::atomic<bool> gUiLatencyEnabled{false};
 static uilatency::Trace gUiLatency;
-static void uiLatency(unsigned kind,uint64_t id,unsigned work,uint64_t tick=0) {
+static void uiLatency(unsigned kind,uint64_t id,unsigned work,uint64_t tick=0,uint64_t tid=0) {
  if(gUiLatencyEnabled.load(std::memory_order_relaxed))
-  gUiLatency.push({tick?tick:mach_absolute_time(),id,kind,work});
+  gUiLatency.push({tick?tick:mach_absolute_time(),id,kind,work,tid});
 }
 #if defined(NMB_RUNTIME_COMMIT_TRACE)
 // Both callbacks are nonblocking, non-reentrant, and cannot call the runtime.
 static uint64_t runtimeTraceClock() {return mach_absolute_time();}
-static void runtimeTraceSink(uint32_t kind,uint64_t id,uint64_t tick) {uiLatency(kind,id,0,tick);}
+static void runtimeTraceSink(uint32_t kind,uint64_t id,uint64_t tick) {
+ if(!gUiLatencyEnabled.load(std::memory_order_relaxed)) return;
+ uint64_t tid=0;
+#if defined(__APPLE__)
+ if((kind==64 || kind==65) && pthread_threadid_np(nullptr,&tid)) tid=0;
+#endif
+ uiLatency(kind,id,0,tick,tid);
+}
 #endif
 extern "C" void native_bridge_metal_latency_record(uint32_t kind,uint64_t id,uint64_t tick) {uiLatency(kind,id,0,tick);}
 extern "C" void native_bridge_metal_enable_latency(bool enabled) {gUiLatencyEnabled.store(enabled);}
 extern "C" bool native_bridge_metal_latency_event(uint64_t out[4]) {
  uilatency::Event e;if(!out || !gUiLatencyEnabled.load() || !gUiLatency.pop(e))return false;
  out[0]=e.tick;out[1]=e.id;out[2]=e.kind;out[3]=e.work;return true;
+}
+extern "C" bool native_bridge_metal_latency_event_with_tid(uint64_t out[5]) {
+ uilatency::Event e;if(!out || !gUiLatencyEnabled.load() || !gUiLatency.pop(e))return false;
+ out[0]=e.tick;out[1]=e.id;out[2]=e.kind;out[3]=e.work;out[4]=e.tid;return true;
 }
 extern "C" uint64_t native_bridge_metal_latency_lost(void) {return gUiLatency.lost();}
 

@@ -18,6 +18,7 @@ size_t native_bridge_metal_status(char *out, size_t size);
 void native_bridge_metal_enable_latency(bool enabled);
 void native_bridge_metal_latency_record(uint32_t kind,uint64_t id,uint64_t tick);
 bool native_bridge_metal_latency_event(uint64_t out[4]);
+bool native_bridge_metal_latency_event_with_tid(uint64_t out[5]);
 uint64_t native_bridge_metal_latency_lost(void);
 // Optional diagnostic, null by default. Install before device publication. The
 // first two render-pipeline failures call it synchronously, outside telemetry

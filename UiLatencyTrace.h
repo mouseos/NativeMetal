@@ -4,7 +4,7 @@
 // Fixed diagnostic queue. Try-lock only: a contended producer/consumer never waits.
 // Callers supply the timestamp; output is drained outside all runtime/VM locks.
 namespace uilatency {
-struct Event { uint64_t tick,id; uint32_t kind,work; };
+struct Event { uint64_t tick,id; uint32_t kind,work; uint64_t tid = 0; };
 class Trace {
     unsigned lock_ = 0, head_ = 0, count_ = 0;
     uint64_t lost_ = 0;

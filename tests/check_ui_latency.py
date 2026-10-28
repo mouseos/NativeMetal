@@ -37,6 +37,27 @@ with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'test.cpp').write_text(source)
  subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-pthread','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(r),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)
+thread_source=r'''
+#define NMB_RUNTIME_COMMIT_TRACE 1
+#define __APPLE__ 1
+#include "UiLatencyTrace.h"
+#include <atomic>
+#include <cassert>
+static unsigned tidCalls; static bool failTid;
+static uint64_t mach_absolute_time(){return 101;}
+static int pthread_threadid_np(void *,uint64_t *out){++tidCalls;*out=0x100000123ULL;return failTid?1:0;}
+HOOKS
+int main(){(void)runtimeTraceClock;uint64_t out[5];runtimeTraceSink(64,7,200);assert(!tidCalls&&!native_bridge_metal_latency_event_with_tid(out));
+ native_bridge_metal_enable_latency(true);runtimeTraceSink(64,7,200);assert(tidCalls==1);
+ assert(native_bridge_metal_latency_event_with_tid(out)&&out[0]==200&&out[1]==7&&out[2]==64&&out[4]==0x100000123ULL);
+ runtimeTraceSink(60,8,201);assert(tidCalls==1);assert(native_bridge_metal_latency_event_with_tid(out)&&out[4]==0);
+ failTid=true;runtimeTraceSink(65,9,202);assert(tidCalls==2);assert(native_bridge_metal_latency_event_with_tid(out)&&out[4]==0);
+ assert(!native_bridge_metal_latency_event_with_tid(nullptr));}
+'''.replace('HOOKS',hooks)
+with tempfile.TemporaryDirectory() as d:
+ p=Path(d);(p/'tid.cpp').write_text(thread_source)
+ subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-pthread','-Wall','-Wextra','-Werror','-I',str(r),str(p/'tid.cpp'),'-o',str(p/'tid')],check=True)
+ subprocess.run([str(p/'tid')],check=True)
 assert 'PVR_METAL_LATENCY_DIAG' in (r/'NativeVulkanMetalPlugin.mm').read_text()
 commit=s[s.index('- (void)commit {'):s.index('- (void)waitUntilCompleted {')]
 assert 'nmb_command_buffer_commit_profiled(_handle,self.commitIndex,runtimeTraceClock,runtimeTraceSink)' in commit

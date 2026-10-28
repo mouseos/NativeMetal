@@ -279,10 +279,13 @@ static void startServerThreads() {
                 static bool clockShown=false;
                 if(!clockShown) {mach_timebase_info_data_t base={};mach_timebase_info(&base);
                     say("UIL p%u clock n%u d%u",(unsigned)getpid(),base.numer,base.denom);clockShown=true;}
-                uint64_t e[4];
-                for(unsigned n=0;n<256 && native_bridge_metal_latency_event(e);++n)
+                uint64_t e[5];
+                for(unsigned n=0;n<256 && native_bridge_metal_latency_event_with_tid(e);++n) {
                     say("UIL p%u e%u i%llx t%llx",(unsigned)getpid(),(unsigned)e[2],
                         (unsigned long long)e[1],(unsigned long long)e[0]);
+                    if(e[4]) say("UILT p%u e%u i%llx th%llx",(unsigned)getpid(),(unsigned)e[2],
+                                 (unsigned long long)e[1],(unsigned long long)e[4]);
+                }
                 static uint64_t lost=0;const uint64_t current=native_bridge_metal_latency_lost();
                 if(current!=lost) {say("UIL lost %llu",(unsigned long long)current);lost=current;}
             }
