@@ -20,12 +20,14 @@
 #include <unordered_map>
 #include <vector>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <mach/mach.h>
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
+#include "NativeMetalPoolSize.h"
 
 extern "C" void sys_dcache_flush(void *start, size_t length);
 
@@ -1699,6 +1701,10 @@ static void installAnswers(Class cls) {
 extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
  if(gDeviceObject)return gDeviceObject;
  gMissing=missing;gInFlight=[NSMutableSet set];
+ {uint64_t memsize=0;size_t length=sizeof memsize;
+  if(sysctlbyname("hw.memsize",&memsize,&length,nullptr,0)!=0||length!=sizeof memsize)memsize=0;
+  if(unsigned mib=nmb_pool_block_resolve_auto(memsize))
+   NSLog(@"native-metal: pool block %u MiB (NMB_POOL_BLOCK_MIB=auto, hw.memsize %llu MiB)",mib,(unsigned long long)(memsize>>20));}
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
  if(!nmb_device_require_fetch_for_apple3(gDevice,gRequireFetchForApple3.load(std::memory_order_acquire)))return nil;
